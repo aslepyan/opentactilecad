@@ -567,7 +567,6 @@ async function generate() {
 
         setStatus(`Done! ${s.active_pixels} pixels, ${s.col_routes + s.row_routes} routes`);
     } catch (err) {
-        clearTimeout(coldStartTimer);
         setStatus(`Error: ${err.message}`);
         console.error(err);
     }
