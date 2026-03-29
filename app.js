@@ -436,15 +436,15 @@ function getParam(id) {
 }
 
 // Auto-link pixel size → pitch (maintain gap when pixel size changes)
-// Gap = pitch - pixel. When pixel changes, keep the same gap.
+// Snapshot the gap when user focuses the input, then apply it on each change.
 (function() {
-    document.getElementById("pixel_w_mm").addEventListener("input", () => {
-        const gap = getParam("pitch_x_mm") - getParam("pixel_w_mm");
-        if (gap < 0.1) setParam("pitch_x_mm", +(getParam("pixel_w_mm") + 0.2).toFixed(2));
-    });
-    document.getElementById("pixel_h_mm").addEventListener("input", () => {
-        const gap = getParam("pitch_y_mm") - getParam("pixel_h_mm");
-        if (gap < 0.1) setParam("pitch_y_mm", +(getParam("pixel_h_mm") + 0.2).toFixed(2));
+    let gapX = 0.2, gapY = 0.2;
+    const wEl = document.getElementById("pixel_w_mm");
+    const hEl = document.getElementById("pixel_h_mm");
+    wEl.addEventListener("focus", () => { gapX = Math.max(getParam("pitch_x_mm") - getParam("pixel_w_mm"), 0.1); });
+    wEl.addEventListener("input", () => { setParam("pitch_x_mm", +(getParam("pixel_w_mm") + gapX).toFixed(2)); });
+    hEl.addEventListener("focus", () => { gapY = Math.max(getParam("pitch_y_mm") - getParam("pixel_h_mm"), 0.1); });
+    hEl.addEventListener("input", () => { setParam("pitch_y_mm", +(getParam("pixel_h_mm") + gapY).toFixed(2));
     });
 })();
 
