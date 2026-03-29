@@ -423,6 +423,7 @@ function loadPreset() {
 
     // Resize canvas first (preview panel was just hidden, giving more space)
     requestAnimationFrame(resizeCanvas);
+    renderPixelPreview();
 }
 
 function setParam(id, val) {
