@@ -510,7 +510,7 @@ async function generate() {
     // Wake up the server first (Render free tier spins down after 15min idle)
     try {
         await fetch(`${API_URL}/health`);
-    } catch {
+    } catch (e) {
         setStatus("Server is waking up — this may take up to 60s on first use...", true);
         // Keep trying health endpoint until server is ready
         for (let i = 0; i < 12; i++) {
@@ -518,7 +518,7 @@ async function generate() {
             try {
                 const h = await fetch(`${API_URL}/health`);
                 if (h.ok) break;
-            } catch {}
+            } catch (e2) {}
         }
         setStatus("Generating PCB...", true);
     }
