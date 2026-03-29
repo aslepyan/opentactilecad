@@ -256,3 +256,44 @@ canvas {
 }
 
 .hidden { display: none !important; }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .app {
+        flex-direction: column;
+        height: auto;
+        min-height: calc(100vh - 56px);
+    }
+
+    .panel {
+        width: 100%;
+        border-right: none;
+        border-bottom: 1px solid #d2d2d7;
+        max-height: 40vh;
+        overflow-y: auto;
+    }
+
+    .canvas-container {
+        min-height: 300px;
+    }
+
+    .pixel-preview-panel {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #d2d2d7;
+        max-height: 200px;
+    }
+
+    .preview-panel {
+        margin: 0 8px 8px;
+    }
+
+    .preview-panel .svg-container svg {
+        max-height: 250px;
+    }
+
+    .status-bar {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+}
