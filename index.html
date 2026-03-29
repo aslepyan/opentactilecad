@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenTactileCAD</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>OpenTactileCAD</h1>
+        <span class="subtitle">Tactile Sensor PCB Generator</span>
+    </header>
+
+    <div class="app">
+        <!-- Left panel: controls -->
+        <div class="panel">
+            <h2>Shape</h2>
+            <select id="preset-select">
+                <option value="">-- Select preset --</option>
+            </select>
+            <button class="btn btn-draw" id="btn-draw">Draw Outline</button>
+            <button class="btn btn-secondary" id="btn-clear">Clear</button>
+
+            <h2>Pixel Geometry</h2>
+            <label>Pixel W (mm) <input type="number" id="pixel_w_mm" value="4.0" step="0.1" min="0.5"></label>
+            <label>Pixel H (mm) <input type="number" id="pixel_h_mm" value="4.0" step="0.1" min="0.5"></label>
+            <label>Pitch X (mm) <input type="number" id="pitch_x_mm" value="4.2" step="0.1" min="0.5"></label>
+            <label>Pitch Y (mm) <input type="number" id="pitch_y_mm" value="4.2" step="0.1" min="0.5"></label>
+
+            <h2>Traces</h2>
+            <label>Trace W (mm) <input type="number" id="trace_w_mm" value="0.2" step="0.01" min="0.05"></label>
+            <label>Gap (mm) <input type="number" id="gap_mm" value="0.2" step="0.01" min="0.05"></label>
+            <label>Clearance (mm) <input type="number" id="clearance_mm" value="0.2" step="0.01" min="0.05"></label>
+
+            <h2>Board</h2>
+            <label>Edge Keepout (mm) <input type="number" id="edge_keepout_mm" value="0.5" step="0.1" min="0"></label>
+            <label>Board Edge Clear (mm) <input type="number" id="board_edge_clear_mm" value="0.4" step="0.1" min="0"></label>
+            <label>Cable Length (mm) <input type="number" id="cable_length_mm" value="4.0" step="0.5" min="1"></label>
+
+            <h2>Via</h2>
+            <label>Center Clear (mm) <input type="number" id="center_clear_mm" value="0.2" step="0.01" min="0"></label>
+            <label>Edge Clear (mm) <input type="number" id="edge_clear_mm" value="0.1" step="0.01" min="0"></label>
+            <label>Via Drill (mm) <input type="number" id="via_drill_mm" value="0.15" step="0.01" min="0.05"></label>
+            <label>Via Dia (mm) <input type="number" id="via_dia_mm" value="0.35" step="0.01" min="0.1"></label>
+            <label>Pad Pitch (mm) <input type="number" id="pad_pitch_mm" value="0.5" step="0.1" min="0.3"></label>
+
+            <h2>Generate</h2>
+            <button class="btn btn-primary" id="btn-generate" disabled>Generate PCB</button>
+            <button class="btn btn-success hidden" id="btn-download">Download ZIP</button>
+
+            <div id="status-text" style="margin-top: 8px; font-size: 12px; color: #6e6e73;"></div>
+        </div>
+
+        <!-- Main area: canvas + board preview -->
+        <div class="main">
+            <div class="canvas-container">
+                <canvas id="canvas"></canvas>
+            </div>
+
+            <div class="preview-panel hidden" id="preview-panel">
+                <h3>Routed Board Preview</h3>
+                <div class="svg-container" id="svg-container"></div>
+                <dl class="stats-grid" id="stats-grid"></dl>
+                <div id="drc-status"></div>
+            </div>
+
+            <div class="status-bar">
+                <span id="coord-display">Move mouse over canvas</span>
+                <span id="vertex-count">0 vertices</span>
+            </div>
+        </div>
+
+        <!-- Right panel: pixel preview -->
+        <div class="pixel-preview-panel" id="pixel-preview-panel">
+            <h3>Pixel Preview</h3>
+            <div id="pixel-preview"></div>
+        </div>
+    </div>
+
+    <script src="presets.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
