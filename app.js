@@ -3,7 +3,7 @@
 // ============================================================
 const API_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8000"
-    : "https://opentactilecad.onrender.com";
+    : "https://custom-pcb-dev.onrender.com";
 
 // ============================================================
 // Geometry helpers
