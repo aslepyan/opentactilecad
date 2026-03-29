@@ -515,32 +515,28 @@ async function generate() {
     previewPanel.classList.add("hidden");
     lastResult = null;
 
-    // Fetch with retry for cold starts (Render free tier spins down after 15min idle)
-    const coldStartTimer = setTimeout(() => {
-        setStatus("Server is waking up — free tier cold start, may take ~30s...", true);
-    }, 5000);
-
-    const maxRetries = 2;
-    let resp;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            resp = await fetch(`${API_URL}/generate`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            break;
-        } catch (fetchErr) {
-            if (attempt < maxRetries) {
-                setStatus("Server is waking up — retrying...", true);
-                await new Promise(r => setTimeout(r, 5000));
-            } else {
-                clearTimeout(coldStartTimer);
-                throw fetchErr;
-            }
+    // Wake up the server first (Render free tier spins down after 15min idle)
+    try {
+        await fetch(`${API_URL}/health`);
+    } catch {
+        setStatus("Server is waking up — this may take up to 60s on first use...", true);
+        // Keep trying health endpoint until server is ready
+        for (let i = 0; i < 12; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+                const h = await fetch(`${API_URL}/health`);
+                if (h.ok) break;
+            } catch {}
         }
+        setStatus("Generating PCB...", true);
     }
-    clearTimeout(coldStartTimer);
+
+    try {
+        const resp = await fetch(`${API_URL}/generate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
 
         if (!resp.ok) {
             const err = await resp.json();
