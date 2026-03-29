@@ -436,23 +436,15 @@ function getParam(id) {
 }
 
 // Auto-link pixel size → pitch (maintain gap when pixel size changes)
+// Gap = pitch - pixel. When pixel changes, keep the same gap.
 (function() {
-    let prevW = getParam("pixel_w_mm");
-    let prevH = getParam("pixel_h_mm");
-
     document.getElementById("pixel_w_mm").addEventListener("input", () => {
-        const oldGap = getParam("pitch_x_mm") - prevW;
-        const gap = Math.max(oldGap, 0.1);
-        const newW = getParam("pixel_w_mm");
-        setParam("pitch_x_mm", +(newW + gap).toFixed(2));
-        prevW = newW;
+        const gap = getParam("pitch_x_mm") - getParam("pixel_w_mm");
+        if (gap < 0.1) setParam("pitch_x_mm", +(getParam("pixel_w_mm") + 0.2).toFixed(2));
     });
     document.getElementById("pixel_h_mm").addEventListener("input", () => {
-        const oldGap = getParam("pitch_y_mm") - prevH;
-        const gap = Math.max(oldGap, 0.1);
-        const newH = getParam("pixel_h_mm");
-        setParam("pitch_y_mm", +(newH + gap).toFixed(2));
-        prevH = newH;
+        const gap = getParam("pitch_y_mm") - getParam("pixel_h_mm");
+        if (gap < 0.1) setParam("pitch_y_mm", +(getParam("pixel_h_mm") + 0.2).toFixed(2));
     });
 })();
 
