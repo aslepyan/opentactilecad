@@ -775,24 +775,33 @@ async function fetchWithTimeout(url, timeoutMs) {
 }
 
 async function ensureServerAwake() {
+    // Quick probe: if the server's already warm this resolves in well under
+    // a second, so a short timeout here is fine — it only needs to fail
+    // fast, not succeed slowly.
     try {
-        const resp = await fetchWithTimeout(`${API_URL}/health`, 10000);
+        const resp = await fetchWithTimeout(`${API_URL}/health`, 6000);
         if (resp.ok) return;
     } catch (e) {}
 
-    // Server is cold (Render free tier spins down after 15min idle) — first
-    // request of a session can take a while to boot. Poll /health and show
-    // elapsed time so it's clear this is progressing, not stuck.
+    // Server is cold (Render free tier spins down after 15min idle). A real
+    // cold-boot response can take 15-40+s to actually arrive — NOT hang
+    // forever, just be slow — so each retry attempt below uses a generous
+    // per-attempt timeout. (An earlier version used a 10s timeout here,
+    // which was short enough to abort almost every attempt right before it
+    // would have succeeded, guaranteeing the full wait budget was used on
+    // every cold start even though the server was actually coming up
+    // fine — the real request right after, with no artificial timeout,
+    // would then succeed immediately.)
     const startedAt = Date.now();
     const maxWaitMs = 180000;  // 3 minutes
     while (Date.now() - startedAt < maxWaitMs) {
         const elapsedS = Math.round((Date.now() - startedAt) / 1000);
         setStatus(`Server is waking up (this can take a minute or two on a cold start) — ${elapsedS}s...`, true);
-        await new Promise(r => setTimeout(r, 3000));
         try {
-            const h = await fetchWithTimeout(`${API_URL}/health`, 10000);
+            const h = await fetchWithTimeout(`${API_URL}/health`, 35000);
             if (h.ok) return;
         } catch (e2) {}
+        await new Promise(r => setTimeout(r, 1000));
     }
     setStatus("Server is taking longer than expected to wake up — continuing anyway...", true);
 }
