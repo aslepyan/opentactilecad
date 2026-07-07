@@ -762,18 +762,25 @@ function setStatus(msg, loading = false) {
 // ============================================================
 async function ensureServerAwake() {
     try {
-        await fetch(`${API_URL}/health`);
-    } catch (e) {
-        setStatus("Server is waking up — this may take up to 60s on first use...", true);
-        // Keep trying health endpoint until server is ready
-        for (let i = 0; i < 12; i++) {
-            await new Promise(r => setTimeout(r, 5000));
-            try {
-                const h = await fetch(`${API_URL}/health`);
-                if (h.ok) break;
-            } catch (e2) {}
-        }
+        const resp = await fetch(`${API_URL}/health`);
+        if (resp.ok) return;
+    } catch (e) {}
+
+    // Server is cold (Render free tier spins down after 15min idle) — first
+    // request of a session can take a while to boot. Poll /health and show
+    // elapsed time so it's clear this is progressing, not stuck.
+    const startedAt = Date.now();
+    const maxWaitMs = 180000;  // 3 minutes
+    while (Date.now() - startedAt < maxWaitMs) {
+        const elapsedS = Math.round((Date.now() - startedAt) / 1000);
+        setStatus(`Server is waking up (this can take a minute or two on a cold start) — ${elapsedS}s...`, true);
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+            const h = await fetch(`${API_URL}/health`);
+            if (h.ok) return;
+        } catch (e2) {}
     }
+    setStatus("Server is taking longer than expected to wake up — continuing anyway...", true);
 }
 
 // ============================================================
