@@ -64,10 +64,14 @@ function rotateForCable(pts) {
 // ============================================================
 let outline = [];          // Array of [x, y] in mm
 let fillRegion = [];       // Array of [x, y] in mm — optional sensor-fill region
-let drawMode = null;       // null | "outline" | "fill"
+let drawMode = null;       // null | "outline" | "fill" | "pick-edge"
 let draggingWhich = null;  // null | "outline" | "fill"
 let draggingIdx = -1;
 let lastResult = null;     // Store ZIP for download
+
+// DXF import — a polygon awaiting cable-edge selection before it becomes `outline`
+let pendingImportLoop = [];
+let hoveredEdgeIdx = -1;
 
 // Canvas state
 const canvas = document.getElementById("canvas");
@@ -81,6 +85,8 @@ let viewOffsetY = 0;
 // ============================================================
 const presetSelect = document.getElementById("preset-select");
 const btnDraw = document.getElementById("btn-draw");
+const btnImportDxf = document.getElementById("btn-import-dxf");
+const dxfFileInput = document.getElementById("dxf-file-input");
 const btnDrawFill = document.getElementById("btn-draw-fill");
 const btnClear = document.getElementById("btn-clear");
 const btnGenerate = document.getElementById("btn-generate");
@@ -107,6 +113,8 @@ function init() {
 
     presetSelect.addEventListener("change", loadPreset);
     btnDraw.addEventListener("click", toggleDraw);
+    btnImportDxf.addEventListener("click", () => dxfFileInput.click());
+    dxfFileInput.addEventListener("change", onDxfFileSelected);
     btnDrawFill.addEventListener("click", toggleDrawFill);
     btnClear.addEventListener("click", clearOutline);
     btnGenerate.addEventListener("click", generate);
@@ -133,8 +141,9 @@ function resizeCanvas() {
 // ============================================================
 // View transform: mm -> canvas pixels
 // ============================================================
-function fitView() {
-    if (outline.length < 2) {
+function fitView(points) {
+    points = points || (outline.length >= 2 ? outline : pendingImportLoop);
+    if (points.length < 2) {
         // Default view: -50 to 50 mm
         const span = 100;
         viewScale = Math.min(canvas.width, canvas.height) / span * 0.8;
@@ -142,8 +151,8 @@ function fitView() {
         viewOffsetY = canvas.height / 2;
         return;
     }
-    const xs = outline.map(p => p[0]);
-    const ys = outline.map(p => p[1]);
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
     const xmin = Math.min(...xs), xmax = Math.max(...xs);
     const ymin = Math.min(...ys), ymax = Math.max(...ys);
     const w = xmax - xmin || 40;
@@ -250,6 +259,39 @@ function render() {
         }
     }
 
+    // DXF import awaiting cable-edge selection
+    if (drawMode === "pick-edge" && pendingImportLoop.length > 0) {
+        ctx.beginPath();
+        const [sx, sy] = mmToCanvas(pendingImportLoop[0][0], pendingImportLoop[0][1]);
+        ctx.moveTo(sx, sy);
+        for (let i = 1; i < pendingImportLoop.length; i++) {
+            const [px, py] = mmToCanvas(pendingImportLoop[i][0], pendingImportLoop[i][1]);
+            ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fillStyle = "rgba(175, 82, 222, 0.06)";
+        ctx.fill();
+        ctx.strokeStyle = "#af52de";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Highlight the hovered edge as the candidate cable edge
+        if (hoveredEdgeIdx >= 0) {
+            const n = pendingImportLoop.length;
+            const [ax, ay] = mmToCanvas(
+                pendingImportLoop[hoveredEdgeIdx][0], pendingImportLoop[hoveredEdgeIdx][1]);
+            const [bx, by] = mmToCanvas(
+                pendingImportLoop[(hoveredEdgeIdx + 1) % n][0],
+                pendingImportLoop[(hoveredEdgeIdx + 1) % n][1]);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.strokeStyle = "#ff9500";
+            ctx.lineWidth = 4;
+            ctx.stroke();
+        }
+    }
+
     // Instructions
     if (outline.length === 0 && !drawMode) {
         ctx.font = "16px sans-serif";
@@ -267,6 +309,10 @@ function render() {
         ctx.font = "12px sans-serif";
         ctx.fillStyle = "#ff3b30";
         ctx.fillText("Click to place sensor-fill vertices. Double-click or click near first vertex to close.", 12, 20);
+    } else if (drawMode === "pick-edge") {
+        ctx.font = "12px sans-serif";
+        ctx.fillStyle = "#af52de";
+        ctx.fillText("Hover an edge (highlighted orange) and click to set it as the cable edge.", 12, 20);
     }
 
     updateUI();
@@ -362,7 +408,115 @@ function toggleDrawFill() {
     render();
 }
 
+// ============================================================
+// DXF import
+// ============================================================
+async function onDxfFileSelected(e) {
+    const file = e.target.files[0];
+    dxfFileInput.value = "";  // allow re-selecting the same file later
+    if (!file) return;
+    await importDxf(file);
+}
+
+async function importDxf(file) {
+    setStatus("Importing DXF...", true);
+    await ensureServerAwake();
+    setStatus("Importing DXF...", true);
+
+    try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const resp = await fetch(`${API_URL}/import-dxf`, {
+            method: "POST",
+            body: formData,
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json();
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        drawMode = "pick-edge";
+        pendingImportLoop = data.loops[data.chosen_index];
+        hoveredEdgeIdx = -1;
+        outline = [];
+        fillRegion = [];
+        previewPanel.classList.add("hidden");
+        lastResult = null;
+        canvas.style.cursor = "crosshair";
+
+        const warningText = data.warnings.length ? ` (${data.warnings.join(" ")})` : "";
+        setStatus(`DXF imported — click the edge where the cable should exit${warningText}`);
+
+        fitView();
+        render();
+    } catch (err) {
+        setStatus(`Error importing DXF: ${err.message}`);
+        console.error(err);
+    }
+}
+
+// Index of the pendingImportLoop edge nearest a canvas point, or -1 if too far.
+function findNearestLoopEdge(cx, cy, maxDistPx = 15) {
+    let best = -1, bestDist = maxDistPx;
+    const n = pendingImportLoop.length;
+    for (let i = 0; i < n; i++) {
+        const [ax, ay] = mmToCanvas(pendingImportLoop[i][0], pendingImportLoop[i][1]);
+        const [bx, by] = mmToCanvas(pendingImportLoop[(i + 1) % n][0], pendingImportLoop[(i + 1) % n][1]);
+        const dist = pointToSegmentDist(cx, cy, ax, ay, bx, by);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = i;
+        }
+    }
+    return best;
+}
+
+function pointToSegmentDist(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    return Math.hypot(px - cx, py - cy);
+}
+
+function confirmEdgePick() {
+    if (hoveredEdgeIdx < 0 || pendingImportLoop.length < 3) return;
+    const n = pendingImportLoop.length;
+
+    // finalizeOutline() runs ensureCCW(), which only guarantees vertex 0 stays
+    // put — if the array needs reversing (because it's wound clockwise),
+    // vertex 1 gets replaced by the *old last* vertex, not necessarily the
+    // picked edge's other endpoint. So the walk direction here must match
+    // pendingImportLoop's own winding: forward if it's already CCW (ensureCCW
+    // will no-op), or the reverse traversal starting from the edge's second
+    // vertex if it's CW (so the array is already CCW by the time it gets
+    // there, and ensureCCW again no-ops) — either way the picked edge ends up
+    // intact at outline[0]/outline[1].
+    const isCCW = signedArea(pendingImportLoop) >= 0;
+    outline = [];
+    for (let i = 0; i < n; i++) {
+        const idx = isCCW
+            ? (hoveredEdgeIdx + i) % n
+            : (hoveredEdgeIdx + 1 - i + n) % n;
+        outline.push(pendingImportLoop[idx]);
+    }
+
+    pendingImportLoop = [];
+    hoveredEdgeIdx = -1;
+    drawMode = null;
+    canvas.style.cursor = "default";
+    finalizeOutline();
+}
+
 function onCanvasClick(e) {
+    if (drawMode === "pick-edge") {
+        confirmEdgePick();
+        return;
+    }
     if (drawMode !== "outline" && drawMode !== "fill") return;
     const target = drawMode === "outline" ? outline : fillRegion;
 
@@ -408,7 +562,14 @@ function finishDrawing() {
     btnDraw.textContent = "Draw Outline";
     btnDraw.classList.remove("active");
     canvas.style.cursor = "default";
-    // Ensure CCW winding, then rotate so cable edge is horizontal at bottom
+    finalizeOutline();
+}
+
+// Shared tail for any path that produces a raw outline polygon (freehand
+// drawing or DXF import + edge pick): normalize winding, rotate so the
+// cable edge (vertices 0->1) is horizontal at the bottom, reset dependent
+// state, and refresh the view.
+function finalizeOutline() {
     outline = ensureCCW(outline);
     outline = rotateForCable(outline);
     // Outline changed shape/orientation — any prior fill region no longer applies
@@ -437,6 +598,12 @@ function onCanvasMove(e) {
         const target = draggingWhich === "outline" ? outline : fillRegion;
         target[draggingIdx] = [Math.round(mx), Math.round(my)];
         render();
+    } else if (drawMode === "pick-edge") {
+        const nearest = findNearestLoopEdge(cx, cy);
+        if (nearest !== hoveredEdgeIdx) {
+            hoveredEdgeIdx = nearest;
+            render();
+        }
     }
 }
 
@@ -487,6 +654,8 @@ function loadPreset() {
     const preset = PRESETS[name];
     outline = preset.outline.map(p => [...p]);
     fillRegion = [];
+    pendingImportLoop = [];
+    hoveredEdgeIdx = -1;
 
     // Set default params first
     setParam("pixel_w_mm", 4.0);
@@ -549,11 +718,14 @@ function getParam(id) {
 function clearOutline() {
     outline = [];
     fillRegion = [];
+    pendingImportLoop = [];
+    hoveredEdgeIdx = -1;
     drawMode = null;
     btnDraw.textContent = "Draw Outline";
     btnDraw.classList.remove("active");
     btnDrawFill.textContent = "Draw Sensor Fill";
     btnDrawFill.classList.remove("active");
+    canvas.style.cursor = "default";
     previewPanel.classList.add("hidden");
     lastResult = null;
     presetSelect.value = "";
@@ -565,11 +737,15 @@ function clearOutline() {
 // UI state
 // ============================================================
 function updateUI() {
-    vertexCount.textContent = fillRegion.length > 0
-        ? `${outline.length} outline / ${fillRegion.length} fill vertices`
-        : `${outline.length} vertices`;
+    vertexCount.textContent = drawMode === "pick-edge"
+        ? `${pendingImportLoop.length} imported vertices — pick cable edge`
+        : fillRegion.length > 0
+            ? `${outline.length} outline / ${fillRegion.length} fill vertices`
+            : `${outline.length} vertices`;
     btnGenerate.disabled = outline.length < 3 || drawMode !== null;
-    btnDrawFill.disabled = outline.length < 3 || drawMode === "outline";
+    btnDraw.disabled = drawMode === "fill" || drawMode === "pick-edge";
+    btnImportDxf.disabled = drawMode !== null;
+    btnDrawFill.disabled = outline.length < 3 || drawMode === "outline" || drawMode === "pick-edge";
     btnDownload.classList.toggle("hidden", !lastResult);
 }
 
@@ -578,6 +754,25 @@ function setStatus(msg, loading = false) {
         statusText.innerHTML = `<span class="spinner"></span>${msg}`;
     } else {
         statusText.textContent = msg;
+    }
+}
+
+// ============================================================
+// Server wake-up (Render free tier spins down after 15min idle)
+// ============================================================
+async function ensureServerAwake() {
+    try {
+        await fetch(`${API_URL}/health`);
+    } catch (e) {
+        setStatus("Server is waking up — this may take up to 60s on first use...", true);
+        // Keep trying health endpoint until server is ready
+        for (let i = 0; i < 12; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+                const h = await fetch(`${API_URL}/health`);
+                if (h.ok) break;
+            } catch (e2) {}
+        }
     }
 }
 
@@ -612,21 +807,8 @@ async function generate() {
     previewPanel.classList.add("hidden");
     lastResult = null;
 
-    // Wake up the server first (Render free tier spins down after 15min idle)
-    try {
-        await fetch(`${API_URL}/health`);
-    } catch (e) {
-        setStatus("Server is waking up — this may take up to 60s on first use...", true);
-        // Keep trying health endpoint until server is ready
-        for (let i = 0; i < 12; i++) {
-            await new Promise(r => setTimeout(r, 5000));
-            try {
-                const h = await fetch(`${API_URL}/health`);
-                if (h.ok) break;
-            } catch (e2) {}
-        }
-        setStatus("Generating PCB...", true);
-    }
+    await ensureServerAwake();
+    setStatus("Generating PCB...", true);
 
     try {
         const resp = await fetch(`${API_URL}/generate`, {
