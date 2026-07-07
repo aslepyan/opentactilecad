@@ -760,9 +760,23 @@ function setStatus(msg, loading = false) {
 // ============================================================
 // Server wake-up (Render free tier spins down after 15min idle)
 // ============================================================
+// fetch() has no built-in timeout — an in-flight request to a Render
+// instance that's mid-redeploy (connection held open, never responds) can
+// hang indefinitely. Bound each attempt so a stuck request can't block the
+// wake-up loop past its intended wait budget.
+async function fetchWithTimeout(url, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function ensureServerAwake() {
     try {
-        const resp = await fetch(`${API_URL}/health`);
+        const resp = await fetchWithTimeout(`${API_URL}/health`, 10000);
         if (resp.ok) return;
     } catch (e) {}
 
@@ -776,7 +790,7 @@ async function ensureServerAwake() {
         setStatus(`Server is waking up (this can take a minute or two on a cold start) — ${elapsedS}s...`, true);
         await new Promise(r => setTimeout(r, 3000));
         try {
-            const h = await fetch(`${API_URL}/health`);
+            const h = await fetchWithTimeout(`${API_URL}/health`, 10000);
             if (h.ok) return;
         } catch (e2) {}
     }
