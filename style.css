@@ -117,6 +117,15 @@ header .subtitle {
     background: #ff3b30;
 }
 
+.btn-fill {
+    background: #34c759;
+    color: white;
+}
+
+.btn-fill.active {
+    background: #ff3b30;
+}
+
 /* Main area */
 .main {
     flex: 1;

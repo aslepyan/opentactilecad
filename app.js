@@ -63,7 +63,9 @@ function rotateForCable(pts) {
 // State
 // ============================================================
 let outline = [];          // Array of [x, y] in mm
-let isDrawing = false;
+let fillRegion = [];       // Array of [x, y] in mm — optional sensor-fill region
+let drawMode = null;       // null | "outline" | "fill"
+let draggingWhich = null;  // null | "outline" | "fill"
 let draggingIdx = -1;
 let lastResult = null;     // Store ZIP for download
 
@@ -79,6 +81,7 @@ let viewOffsetY = 0;
 // ============================================================
 const presetSelect = document.getElementById("preset-select");
 const btnDraw = document.getElementById("btn-draw");
+const btnDrawFill = document.getElementById("btn-draw-fill");
 const btnClear = document.getElementById("btn-clear");
 const btnGenerate = document.getElementById("btn-generate");
 const btnDownload = document.getElementById("btn-download");
@@ -104,6 +107,7 @@ function init() {
 
     presetSelect.addEventListener("change", loadPreset);
     btnDraw.addEventListener("click", toggleDraw);
+    btnDrawFill.addEventListener("click", toggleDrawFill);
     btnClear.addEventListener("click", clearOutline);
     btnGenerate.addEventListener("click", generate);
     btnDownload.addEventListener("click", downloadZip);
@@ -176,7 +180,7 @@ function render() {
             const [px, py] = mmToCanvas(outline[i][0], outline[i][1]);
             ctx.lineTo(px, py);
         }
-        if (!isDrawing && outline.length > 2) {
+        if (drawMode !== "outline" && outline.length > 2) {
             ctx.closePath();
             ctx.fillStyle = "rgba(0, 113, 227, 0.06)";
             ctx.fill();
@@ -198,7 +202,7 @@ function render() {
         }
 
         // Edge 1 indicator (cable attach edge)
-        if (outline.length >= 2 && !isDrawing) {
+        if (outline.length >= 2 && drawMode !== "outline") {
             const [ax, ay] = mmToCanvas(outline[0][0], outline[0][1]);
             const [bx, by] = mmToCanvas(outline[1][0], outline[1][1]);
             ctx.beginPath();
@@ -215,8 +219,39 @@ function render() {
         }
     }
 
+    // Sensor fill region polygon
+    if (fillRegion.length > 0) {
+        ctx.beginPath();
+        const [sx, sy] = mmToCanvas(fillRegion[0][0], fillRegion[0][1]);
+        ctx.moveTo(sx, sy);
+        for (let i = 1; i < fillRegion.length; i++) {
+            const [px, py] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
+            ctx.lineTo(px, py);
+        }
+        if (drawMode !== "fill" && fillRegion.length > 2) {
+            ctx.closePath();
+            ctx.fillStyle = "rgba(52, 199, 89, 0.12)";
+            ctx.fill();
+        }
+        ctx.strokeStyle = "#34c759";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Vertices
+        for (let i = 0; i < fillRegion.length; i++) {
+            const [vx, vy] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
+            ctx.beginPath();
+            ctx.arc(vx, vy, 5, 0, Math.PI * 2);
+            ctx.fillStyle = "#34c759";
+            ctx.fill();
+            ctx.strokeStyle = "white";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+    }
+
     // Instructions
-    if (outline.length === 0 && !isDrawing) {
+    if (outline.length === 0 && !drawMode) {
         ctx.font = "16px sans-serif";
         ctx.fillStyle = "#86868b";
         ctx.textAlign = "center";
@@ -224,10 +259,14 @@ function render() {
         ctx.textAlign = "start";
     }
 
-    if (isDrawing) {
+    if (drawMode === "outline") {
         ctx.font = "12px sans-serif";
         ctx.fillStyle = "#ff3b30";
         ctx.fillText("Click to place vertices. Double-click or click near first vertex to close.", 12, 20);
+    } else if (drawMode === "fill") {
+        ctx.font = "12px sans-serif";
+        ctx.fillStyle = "#ff3b30";
+        ctx.fillText("Click to place sensor-fill vertices. Double-click or click near first vertex to close.", 12, 20);
     }
 
     updateUI();
@@ -278,28 +317,55 @@ function drawGrid() {
 // Drawing mode
 // ============================================================
 function toggleDraw() {
-    isDrawing = !isDrawing;
-    if (isDrawing) {
+    if (drawMode === "outline") {
+        if (outline.length >= 3) {
+            finishDrawing();
+            return;
+        }
+        drawMode = null;
+        btnDraw.textContent = "Draw Outline";
+        btnDraw.classList.remove("active");
+        canvas.style.cursor = "default";
+    } else if (drawMode === null) {
+        drawMode = "outline";
         outline = [];
+        fillRegion = [];
         btnDraw.textContent = "Stop Drawing";
         btnDraw.classList.add("active");
         canvas.style.cursor = "crosshair";
         previewPanel.classList.add("hidden");
         lastResult = null;
-    } else {
-        if (outline.length >= 3) {
-            finishDrawing();
+    }
+    render();
+}
+
+function toggleDrawFill() {
+    if (outline.length < 3) return;
+    if (drawMode === "fill") {
+        if (fillRegion.length >= 3) {
+            finishDrawingFill();
             return;
         }
-        btnDraw.textContent = "Draw Outline";
-        btnDraw.classList.remove("active");
+        drawMode = null;
+        btnDrawFill.textContent = "Draw Sensor Fill";
+        btnDrawFill.classList.remove("active");
         canvas.style.cursor = "default";
+    } else if (drawMode === null) {
+        drawMode = "fill";
+        fillRegion = [];
+        btnDrawFill.textContent = "Stop Drawing";
+        btnDrawFill.classList.add("active");
+        canvas.style.cursor = "crosshair";
+        previewPanel.classList.add("hidden");
+        lastResult = null;
     }
     render();
 }
 
 function onCanvasClick(e) {
-    if (!isDrawing) return;
+    if (drawMode !== "outline" && drawMode !== "fill") return;
+    const target = drawMode === "outline" ? outline : fillRegion;
+
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
@@ -310,39 +376,53 @@ function onCanvasClick(e) {
     const sy = Math.round(my);
 
     // Close polygon if clicking near first vertex
-    if (outline.length >= 3) {
-        const [fx, fy] = mmToCanvas(outline[0][0], outline[0][1]);
+    if (target.length >= 3) {
+        const [fx, fy] = mmToCanvas(target[0][0], target[0][1]);
         if (Math.hypot(cx - fx, cy - fy) < 15) {
-            finishDrawing();
+            if (drawMode === "outline") finishDrawing();
+            else finishDrawingFill();
             return;
         }
     }
 
-    outline.push([sx, sy]);
+    target.push([sx, sy]);
     render();
 }
 
 function onCanvasDblClick(e) {
-    if (!isDrawing) return;
-    if (outline.length >= 3) {
+    if (drawMode !== "outline" && drawMode !== "fill") return;
+    const target = drawMode === "outline" ? outline : fillRegion;
+    if (target.length >= 3) {
         // Remove the extra vertex added by the click event
         // (dblclick fires two click events first)
-        if (outline.length > 3) {
-            outline.pop();
+        if (target.length > 3) {
+            target.pop();
         }
-        finishDrawing();
+        if (drawMode === "outline") finishDrawing();
+        else finishDrawingFill();
     }
 }
 
 function finishDrawing() {
-    isDrawing = false;
+    drawMode = null;
     btnDraw.textContent = "Draw Outline";
     btnDraw.classList.remove("active");
     canvas.style.cursor = "default";
     // Ensure CCW winding, then rotate so cable edge is horizontal at bottom
     outline = ensureCCW(outline);
     outline = rotateForCable(outline);
+    // Outline changed shape/orientation — any prior fill region no longer applies
+    fillRegion = [];
     fitView();
+    render();
+}
+
+function finishDrawingFill() {
+    drawMode = null;
+    btnDrawFill.textContent = "Draw Sensor Fill";
+    btnDrawFill.classList.remove("active");
+    canvas.style.cursor = "default";
+    fillRegion = ensureCCW(fillRegion);
     render();
 }
 
@@ -354,20 +434,33 @@ function onCanvasMove(e) {
     coordDisplay.textContent = `${mx.toFixed(1)}, ${my.toFixed(1)} mm`;
 
     if (draggingIdx >= 0) {
-        outline[draggingIdx] = [Math.round(mx), Math.round(my)];
+        const target = draggingWhich === "outline" ? outline : fillRegion;
+        target[draggingIdx] = [Math.round(mx), Math.round(my)];
         render();
     }
 }
 
 function onCanvasDown(e) {
-    if (isDrawing) return;
+    if (drawMode !== null) return;
     const rect = canvas.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
 
+    for (let i = 0; i < fillRegion.length; i++) {
+        const [vx, vy] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
+        if (Math.hypot(cx - vx, cy - vy) < 10) {
+            draggingWhich = "fill";
+            draggingIdx = i;
+            canvas.style.cursor = "grabbing";
+            e.preventDefault();
+            return;
+        }
+    }
+
     for (let i = 0; i < outline.length; i++) {
         const [vx, vy] = mmToCanvas(outline[i][0], outline[i][1]);
         if (Math.hypot(cx - vx, cy - vy) < 10) {
+            draggingWhich = "outline";
             draggingIdx = i;
             canvas.style.cursor = "grabbing";
             e.preventDefault();
@@ -379,6 +472,7 @@ function onCanvasDown(e) {
 function onCanvasUp() {
     if (draggingIdx >= 0) {
         draggingIdx = -1;
+        draggingWhich = null;
         canvas.style.cursor = "default";
     }
 }
@@ -392,6 +486,7 @@ function loadPreset() {
 
     const preset = PRESETS[name];
     outline = preset.outline.map(p => [...p]);
+    fillRegion = [];
 
     // Set default params first
     setParam("pixel_w_mm", 4.0);
@@ -415,9 +510,11 @@ function loadPreset() {
         setParam(key, val);
     }
 
-    isDrawing = false;
+    drawMode = null;
     btnDraw.textContent = "Draw Outline";
     btnDraw.classList.remove("active");
+    btnDrawFill.textContent = "Draw Sensor Fill";
+    btnDrawFill.classList.remove("active");
     previewPanel.classList.add("hidden");
     lastResult = null;
 
@@ -451,9 +548,12 @@ function getParam(id) {
 
 function clearOutline() {
     outline = [];
-    isDrawing = false;
+    fillRegion = [];
+    drawMode = null;
     btnDraw.textContent = "Draw Outline";
     btnDraw.classList.remove("active");
+    btnDrawFill.textContent = "Draw Sensor Fill";
+    btnDrawFill.classList.remove("active");
     previewPanel.classList.add("hidden");
     lastResult = null;
     presetSelect.value = "";
@@ -465,8 +565,11 @@ function clearOutline() {
 // UI state
 // ============================================================
 function updateUI() {
-    vertexCount.textContent = `${outline.length} vertices`;
-    btnGenerate.disabled = outline.length < 3 || isDrawing;
+    vertexCount.textContent = fillRegion.length > 0
+        ? `${outline.length} outline / ${fillRegion.length} fill vertices`
+        : `${outline.length} vertices`;
+    btnGenerate.disabled = outline.length < 3 || drawMode !== null;
+    btnDrawFill.disabled = outline.length < 3 || drawMode === "outline";
     btnDownload.classList.toggle("hidden", !lastResult);
 }
 
@@ -486,6 +589,7 @@ async function generate() {
 
     const body = {
         outline: outline,
+        fill_region: fillRegion.length >= 3 ? fillRegion : null,
         pixel_w_mm: getParam("pixel_w_mm"),
         pixel_h_mm: getParam("pixel_h_mm"),
         pitch_x_mm: getParam("pitch_x_mm"),
