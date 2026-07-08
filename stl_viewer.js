@@ -130,14 +130,10 @@ function loadSTL(arrayBuffer) {
     const geometry = loader.parse(arrayBuffer);
     geometry.computeVertexNormals();
 
-    // geometry.center() translates in place without remembering the offset —
-    // capture it ourselves so click points can be converted back to the
-    // STL's own original coordinate frame (what the backend expects, since
-    // it independently re-loads the raw uploaded file).
-    geometry.computeBoundingBox();
-    const centerOffset = geometry.boundingBox.getCenter(new THREE.Vector3());
-    geometry.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
-    geometry.userData.centerOffset = centerOffset;
+    // Selection is now sent to the backend as a face index (hit.faceIndex),
+    // not a 3D point, so centering the view no longer needs to preserve an
+    // offset back to the STL's original coordinate frame.
+    geometry.center();
 
     const baseColors = new Float32Array(geometry.attributes.position.count * 3);
     baseColors.fill(0.75);
@@ -192,8 +188,6 @@ canvas3d.addEventListener('dblclick', async (e) => {
     if (hits.length === 0) return;
 
     const hit = hits[0];
-    const offset = mesh.geometry.userData.centerOffset || new THREE.Vector3();
-    const p = hit.point.clone().add(offset);
 
     const extending = e.shiftKey && selectedFaces.size > 0;
     if (!extending) {
@@ -209,9 +203,7 @@ canvas3d.addEventListener('dblclick', async (e) => {
     try {
         const formData = new FormData();
         formData.append('file', currentFile);
-        formData.append('click_x', p.x);
-        formData.append('click_y', p.y);
-        formData.append('click_z', p.z);
+        formData.append('click_face_index', hit.faceIndex);
         formData.append('existing_faces', extending ? Array.from(selectedFaces).join(',') : '');
 
         const resp = await fetch(`${window.API_URL}/unroll-mesh`, { method: 'POST', body: formData });
