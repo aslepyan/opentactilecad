@@ -237,6 +237,16 @@ canvas3d.addEventListener('dblclick', async (e) => {
         `;
         window.setStatus('Shift+double-click to fold across an edge, or click "Unroll Selection" when ready.');
     } catch (err) {
+        // The clicked triangle was already painted red for instant feedback
+        // before this request was sent — on failure, restore whatever was
+        // actually selected before this click (nothing, if this was the
+        // first click) instead of leaving that single triangle stuck red,
+        // which looks like a real (but wrong) selection rather than a
+        // failed request.
+        resetColors();
+        if (selectedFaces.size > 0) {
+            recolorFaces(Array.from(selectedFaces), new THREE.Color(0.2, 0.8, 1));
+        }
         window.setStatus(`Error: ${err.message}`);
         console.error(err);
     }
