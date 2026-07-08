@@ -4,6 +4,10 @@
 const API_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8000"
     : "https://custom-pcb-dev.onrender.com";
+// stl_viewer.js is a separate ES module (three.js is modules-only) and can't
+// see this const directly — const/let don't attach to window the way
+// top-level function declarations do, so expose it explicitly.
+window.API_URL = API_URL;
 
 // ============================================================
 // Geometry helpers
@@ -457,6 +461,27 @@ async function importDxf(file) {
         console.error(err);
     }
 }
+
+// Called by stl_viewer.js (a separate module) once the user clicks "Unroll
+// Selection" — hands off the unrolled 2D outline exactly the way
+// importDxf()'s success path does, so it goes through the identical
+// pick-edge flow (same reasoning as DXF: the unroll endpoint doesn't
+// normalize winding or choose a cable edge, that stays client-side).
+window.__stlHandoff = function(unrolledOutline) {
+    drawMode = "pick-edge";
+    pendingImportLoop = unrolledOutline;
+    hoveredEdgeIdx = -1;
+    outline = [];
+    fillRegion = [];
+    previewPanel.classList.add("hidden");
+    lastResult = null;
+    canvas.style.cursor = "crosshair";
+
+    setStatus("STL patch unrolled — click the edge where the cable should exit");
+
+    fitView();
+    render();
+};
 
 // Index of the pendingImportLoop edge nearest a canvas point, or -1 if too far.
 function findNearestLoopEdge(cx, cy, maxDistPx = 15) {

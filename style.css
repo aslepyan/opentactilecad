@@ -152,6 +152,29 @@ canvas {
     cursor: crosshair;
 }
 
+#canvas3d {
+    position: absolute;
+    top: 0;
+    left: 0;
+    cursor: grab;
+}
+
+#stl-panel .hint {
+    font-size: 11px;
+    color: #6e6e73;
+    margin: 4px 0 8px;
+    line-height: 1.4;
+}
+
+#stl-stats {
+    font-size: 12px;
+    margin-top: 8px;
+    line-height: 1.6;
+}
+
+#stl-stats .ok { color: #1a7a2e; }
+#stl-stats .warn { color: #c33; }
+
 .status-bar {
     padding: 8px 16px;
     background: white;
