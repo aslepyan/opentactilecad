@@ -41,6 +41,13 @@ let mesh = null;
 let currentFile = null;
 let selectedFaces = new Set();
 let lastOutline = null;
+// Parallel to lastOutline — original mesh vertex index each outline point
+// came from. Only meaningfully populated once a straight-strut connection
+// has happened (see backend NOTES.md); echoed back as prior_outline/
+// prior_outline_vertices on the next shift-click so a 3rd+ region can
+// extend the same running shape, since a strut-joined outline isn't a
+// real mesh region the backend could re-derive from face indices alone.
+let lastOutlineVertexIndices = null;
 let active = false;
 
 function resizeViewer() {
@@ -100,6 +107,7 @@ function exitSTLMode() {
     currentFile = null;
     selectedFaces = new Set();
     lastOutline = null;
+    lastOutlineVertexIndices = null;
     btnUnrollStl.disabled = true;
     stlStatsEl.innerHTML = '';
     // btnDrawFill's correct disabled state depends on outline.length/drawMode
@@ -155,6 +163,7 @@ function loadSTL(arrayBuffer) {
 
     selectedFaces = new Set();
     lastOutline = null;
+    lastOutlineVertexIndices = null;
     btnUnrollStl.disabled = true;
     stlStatsEl.innerHTML = '';
 }
@@ -205,6 +214,14 @@ canvas3d.addEventListener('dblclick', async (e) => {
         formData.append('file', currentFile);
         formData.append('click_face_index', hit.faceIndex);
         formData.append('existing_faces', extending ? Array.from(selectedFaces).join(',') : '');
+        // Present only once an earlier click in this same selection needed
+        // a straight-strut connection (a 3rd+ region extending that same
+        // running shape, which isn't a real mesh region the backend could
+        // re-derive from existing_faces alone — see backend NOTES.md).
+        if (extending && lastOutlineVertexIndices && lastOutlineVertexIndices.length) {
+            formData.append('prior_outline', JSON.stringify(lastOutline));
+            formData.append('prior_outline_vertices', lastOutlineVertexIndices.join(','));
+        }
 
         const resp = await fetch(`${window.API_URL}/unroll-mesh`, { method: 'POST', body: formData });
         if (!resp.ok) {
@@ -217,6 +234,7 @@ canvas3d.addEventListener('dblclick', async (e) => {
         resetColors();
         recolorFaces(data.region_face_indices, new THREE.Color(0.2, 0.8, 1));
         lastOutline = data.outline;
+        lastOutlineVertexIndices = data.outline_vertex_indices;
         btnUnrollStl.disabled = false;
 
         const disagreementClass = data.developability_disagreement_mm < 0.5 ? 'ok' : 'warn';
