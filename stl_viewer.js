@@ -20,6 +20,7 @@
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const canvas2d = document.getElementById('canvas');
 const canvas3d = document.getElementById('canvas3d');
@@ -82,6 +83,19 @@ let connectPicks = [];        // [{side: 1|2, vertexIndex, pos}, ...]
 let connectMarkerGroup = null;
 let connectLineGroup = null;
 
+// Hover preview: highlights the coplanar region a click would select,
+// before committing, so a click landing on an unintended neighboring
+// triangle (e.g. right at a corner/edge) is visible and correctable
+// immediately rather than discovered after the fact. Computed entirely
+// client-side (mirrors the backend's grow_coplanar_region exactly) so it's
+// instant, not a network round trip on every mouse move.
+let faceNormals = [];        // THREE.Vector3 per triangle, index-aligned with the displayed (non-indexed) geometry
+let mergedIndexArray = null; // welded-vertex index buffer, for edge-based adjacency lookups
+let edgeFaces = new Map();   // "vA_vB" (welded vertex indices, a<b) -> [faceIndex, ...]
+let hoverFaceIndex = -1;
+let lastHoverProcessed = -2;
+let hoverRegion = null;
+
 function resizeViewer() {
     const container = canvas3d.parentElement;
     const w = container.clientWidth, h = container.clientHeight;
@@ -94,6 +108,22 @@ window.addEventListener('resize', resizeViewer);
 function animate() {
     requestAnimationFrame(animate);
     if (active) {
+        if (mesh && pendingHoverClientXY && !connectModeActive) {
+            const rect = canvas3d.getBoundingClientRect();
+            mouse.x = ((pendingHoverClientXY[0] - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((pendingHoverClientXY[1] - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const hits = raycaster.intersectObject(mesh);
+            hoverFaceIndex = hits.length > 0 ? hits[0].faceIndex : -1;
+        }
+        // Only recompute the hover region when the raycast hit face
+        // actually changes (not every frame) — skips the BFS + repaint
+        // entirely while the mouse sits still over the same triangle.
+        if (mesh && hoverFaceIndex !== lastHoverProcessed) {
+            lastHoverProcessed = hoverFaceIndex;
+            hoverRegion = hoverFaceIndex >= 0 ? growCoplanarRegionJS(hoverFaceIndex) : null;
+            updateDisplayColors();
+        }
         controls.update();
         renderer.render(scene, camera);
     }
@@ -137,6 +167,13 @@ function exitSTLMode() {
         mesh = null;
     }
     currentFile = null;
+    faceNormals = [];
+    mergedIndexArray = null;
+    edgeFaces = new Map();
+    pendingHoverClientXY = null;
+    hoverFaceIndex = -1;
+    lastHoverProcessed = -2;
+    hoverRegion = null;
     resetSelectionState();
     exitConnectMode();
     stlStatsEl.innerHTML = '';
@@ -196,6 +233,11 @@ function loadSTL(arrayBuffer) {
     const material = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide });
     mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
+    buildAdjacency(geometry);
+    pendingHoverClientXY = null;
+    hoverFaceIndex = -1;
+    lastHoverProcessed = -2;
+    hoverRegion = null;
 
     const box = new THREE.Box3().setFromObject(mesh);
     const size = box.getSize(new THREE.Vector3()).length();
@@ -229,15 +271,112 @@ function resetColors() {
     colorAttr.needsUpdate = true;
 }
 
-// Repaint every clicked region in its own click-indexed color — the live
-// feedback during the selection phase, before any connection math runs.
-function repaintClickedFaces() {
+const HOVER_COLOR = new THREE.Color(1, 1, 0.55);
+const CONFIRMED_COLOR = new THREE.Color(0.2, 0.8, 1);
+
+// Single source of truth for what's currently painted on the mesh: base
+// layer is either the confirmed preview (after "Set Connections") or each
+// clicked region in its own click-indexed color (still selecting), then
+// the hover-preview region (if any) paints on top last, so it's always
+// visible even where it overlaps an already-clicked region.
+function updateDisplayColors() {
     resetColors();
-    clickedFaces.forEach((c, i) => recolorFaces(c.regionFaceIndices, paletteColor(i)));
+    if (lastChainResponse) {
+        recolorFaces(lastChainResponse.region_face_indices, CONFIRMED_COLOR);
+    } else {
+        clickedFaces.forEach((c, i) => recolorFaces(c.regionFaceIndices, paletteColor(i)));
+    }
+    if (hoverRegion && !connectModeActive) {
+        recolorFaces(Array.from(hoverRegion), HOVER_COLOR);
+    }
+}
+
+// Builds the client-side mirror of grow_coplanar_region's inputs, so
+// hovering can preview a click's region instantly with no network round
+// trip. Per-triangle normals come directly from the raw (non-indexed) STL
+// geometry, same cross-product-of-edges computation trimesh uses.
+// Edge-based adjacency needs shared vertex indices, which raw STL data
+// doesn't have (every triangle owns 3 independent vertices) — mergeVertices
+// welds coincident positions into a shared index buffer first, mirroring
+// trimesh's default vertex welding on the backend. mergeVertices preserves
+// triangle order (only vertices are deduplicated), so faceNormals[fi] and
+// mergedIndexArray[3*fi..3*fi+2] both still refer to original triangle fi,
+// matching hit.faceIndex from the raycaster against the *displayed*
+// (unmerged) geometry.
+function buildAdjacency(geometry) {
+    const faceCount = geometry.attributes.position.count / 3;
+    const pos = geometry.attributes.position;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    faceNormals = new Array(faceCount);
+    for (let fi = 0; fi < faceCount; fi++) {
+        a.fromBufferAttribute(pos, fi * 3);
+        b.fromBufferAttribute(pos, fi * 3 + 1);
+        c.fromBufferAttribute(pos, fi * 3 + 2);
+        faceNormals[fi] = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a)).normalize();
+    }
+
+    const merged = mergeVertices(geometry.clone());
+    mergedIndexArray = merged.index.array;
+    edgeFaces = new Map();
+    const addEdge = (v1, v2, fi) => {
+        const key = v1 < v2 ? `${v1}_${v2}` : `${v2}_${v1}`;
+        let list = edgeFaces.get(key);
+        if (!list) { list = []; edgeFaces.set(key, list); }
+        list.push(fi);
+    };
+    for (let fi = 0; fi < faceCount; fi++) {
+        const i0 = mergedIndexArray[fi * 3], i1 = mergedIndexArray[fi * 3 + 1], i2 = mergedIndexArray[fi * 3 + 2];
+        addEdge(i0, i1, fi);
+        addEdge(i1, i2, fi);
+        addEdge(i2, i0, fi);
+    }
+    merged.dispose();
+}
+
+function triangleEdgeKeys(fi) {
+    const i0 = mergedIndexArray[fi * 3], i1 = mergedIndexArray[fi * 3 + 1], i2 = mergedIndexArray[fi * 3 + 2];
+    const k = (x, y) => (x < y ? `${x}_${y}` : `${y}_${x}`);
+    return [k(i0, i1), k(i1, i2), k(i2, i0)];
+}
+
+// Exact client-side mirror of pipeline/mesh_unroll.py's
+// grow_coplanar_region: BFS out from start_face across shared edges, only
+// including neighbors whose normal matches within angle_tol_deg.
+function growCoplanarRegionJS(startFace, angleTolDeg = 2.0) {
+    const cosTol = Math.cos(THREE.MathUtils.degToRad(angleTolDeg));
+    const startNormal = faceNormals[startFace];
+    const visited = new Set([startFace]);
+    const queue = [startFace];
+    while (queue.length) {
+        const fi = queue.pop();
+        for (const key of triangleEdgeKeys(fi)) {
+            const neighbors = edgeFaces.get(key);
+            if (!neighbors) continue;
+            for (const nfi of neighbors) {
+                if (visited.has(nfi)) continue;
+                if (faceNormals[nfi].dot(startNormal) >= cosTol) {
+                    visited.add(nfi);
+                    queue.push(nfi);
+                }
+            }
+        }
+    }
+    return visited;
 }
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
+
+// Raycasting itself is throttled to once per animation frame (not once per
+// mousemove event, which can fire far more often than 60Hz on some
+// trackpads/mice) — the listener just records where the pointer currently
+// is; animate() below does the actual hit test.
+let pendingHoverClientXY = null;
+canvas3d.addEventListener('mousemove', (e) => {
+    if (!mesh || !currentFile || connectModeActive) { pendingHoverClientXY = null; hoverFaceIndex = -1; return; }
+    pendingHoverClientXY = [e.clientX, e.clientY];
+});
+canvas3d.addEventListener('mouseleave', () => { pendingHoverClientXY = null; hoverFaceIndex = -1; });
 
 canvas3d.addEventListener('dblclick', async (e) => {
     if (!mesh || !currentFile || connectModeActive) return;
@@ -269,15 +408,17 @@ canvas3d.addEventListener('dblclick', async (e) => {
         }
         const data = await resp.json();
         clickedFaces.push({ faceIndex: hit.faceIndex, regionFaceIndices: data.region_face_indices });
-        repaintClickedFaces();
 
         // Any change to the face list invalidates the last preview/outline
-        // until the user re-previews.
+        // until the user re-previews — clear it *before* repainting, so
+        // updateDisplayColors() falls back to per-click palette colors
+        // instead of the now-stale confirmed highlight.
         lastChainResponse = null;
         lastOutline = null;
         btnUnrollStl.disabled = true;
         connectionsListEl.innerHTML = '';
         btnPreviewStl.disabled = false;
+        updateDisplayColors();
 
         window.setStatus(`${clickedFaces.length} surface${clickedFaces.length > 1 ? 's' : ''} selected. `
             + 'Shift+double-click to add another, or click "Set Connections" when ready.');
@@ -307,9 +448,7 @@ async function computeChain() {
         const data = await resp.json();
         lastChainResponse = data;
         lastOutline = data.outline;
-
-        resetColors();
-        recolorFaces(data.region_face_indices, new THREE.Color(0.2, 0.8, 1));
+        updateDisplayColors();
         btnUnrollStl.disabled = false;
 
         const warningsHtml = data.warnings.length
@@ -408,6 +547,12 @@ function enterConnectModeForConnection(i, connectionData) {
     connectModeActive = true;
     activeConnectionIndex = i;
     connectPicks = [];
+    // Clear any stuck hover tint immediately rather than waiting for the
+    // next mousemove event to naturally clear it via the animate() loop.
+    hoverFaceIndex = -1;
+    lastHoverProcessed = -1;
+    hoverRegion = null;
+    updateDisplayColors();
     buildConnectMarkers(connectionData.loop_a, connectionData.loop_b);
     btnCancelConnect.classList.remove('hidden');
     connectInstructions.classList.remove('hidden');
