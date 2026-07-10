@@ -5,6 +5,18 @@
 //   - reuses window.ensureServerAwake() / window.setStatus() / window.API_URL,
 //     which app.js exposes (function declarations attach to window
 //     automatically; API_URL is explicitly assigned since `const` doesn't).
+//
+// Standard flow (see NOTES.md's "STL/3D unroll" section for the full
+// history/rationale): (1) select surfaces — click through *all* the faces
+// wanted first, each gets its own color, no connection math happens yet;
+// (2) set connections — "Set Connections" computes the whole chain in one
+// backend request (POST /unroll-mesh-chain); any connection that needed a
+// straight-strut approximation gets its own row, where corners can be
+// picked explicitly instead of leaving it automatic — picking corners for
+// any connection just resubmits the *entire* click list plus an updated
+// sparse map of manual corner overrides, so there's no incremental replay
+// state to keep consistent on this side, the backend recomputes everything
+// fresh; (3) unwrap — hand the resulting flat outline off to the 2D canvas.
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -15,8 +27,12 @@ const stlPanel = document.getElementById('stl-panel');
 const stlStatsEl = document.getElementById('stl-stats');
 const btnImportStl = document.getElementById('btn-import-stl');
 const stlFileInput = document.getElementById('stl-file-input');
+const btnPreviewStl = document.getElementById('btn-preview-stl');
 const btnUnrollStl = document.getElementById('btn-unroll-stl');
 const btnCancelStl = document.getElementById('btn-cancel-stl');
+const btnCancelConnect = document.getElementById('btn-cancel-connect');
+const connectInstructions = document.getElementById('connect-instructions');
+const connectionsListEl = document.getElementById('connections-list');
 
 // Other left-panel controls that would otherwise stay clickable (and
 // confusing to leave live) while the 2D canvas is hidden behind the 3D view.
@@ -37,11 +53,34 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
 dirLight.position.set(1, 1, 1);
 scene.add(dirLight);
 
+// Cycled by click index (selection phase) or group_id (connection markers)
+// so distinct original faces always render as visually distinct colors.
+const PALETTE = [0xff5533, 0x33aa55, 0x3388ff, 0xffaa00, 0xaa33ff, 0x00b3b3, 0xdd3377, 0x77cc00];
+function paletteColor(i) {
+    return new THREE.Color(PALETTE[i % PALETTE.length]);
+}
+
 let mesh = null;
 let currentFile = null;
-let selectedFaces = new Set();
-let lastOutline = null;
 let active = false;
+let meshSize = 1;
+let meshCenterOffset = new THREE.Vector3(); // subtracted from displayed geometry by loadSTL();
+                                             // backend 3D points need the same offset applied
+
+// clickedFaces[i] = { faceIndex, regionFaceIndices } in click order.
+let clickedFaces = [];
+// Sparse map: connectionIndex (0-based gap between clickedFaces[k]/[k+1]) ->
+// [[v_a1, v_b1], [v_a2, v_b2]] of manually-picked original mesh vertex indices.
+let connectionOverrides = {};
+let lastChainResponse = null; // last /unroll-mesh-chain response, or null
+let lastOutline = null;
+
+// Manual "connect corners" flow.
+let connectModeActive = false;
+let activeConnectionIndex = -1;
+let connectPicks = [];        // [{side: 1|2, vertexIndex, pos}, ...]
+let connectMarkerGroup = null;
+let connectLineGroup = null;
 
 function resizeViewer() {
     const container = canvas3d.parentElement;
@@ -98,14 +137,23 @@ function exitSTLMode() {
         mesh = null;
     }
     currentFile = null;
-    selectedFaces = new Set();
-    lastOutline = null;
-    btnUnrollStl.disabled = true;
+    resetSelectionState();
+    exitConnectMode();
     stlStatsEl.innerHTML = '';
     // btnDrawFill's correct disabled state depends on outline.length/drawMode
     // (app.js state this module doesn't track) — let app.js recompute it
     // rather than assume "enabled" is always right.
     window.updateUI();
+}
+
+function resetSelectionState() {
+    clickedFaces = [];
+    connectionOverrides = {};
+    lastChainResponse = null;
+    lastOutline = null;
+    btnPreviewStl.disabled = true;
+    btnUnrollStl.disabled = true;
+    connectionsListEl.innerHTML = '';
 }
 
 btnCancelStl.addEventListener('click', () => {
@@ -130,10 +178,16 @@ function loadSTL(arrayBuffer) {
     const geometry = loader.parse(arrayBuffer);
     geometry.computeVertexNormals();
 
-    // Selection is now sent to the backend as a face index (hit.faceIndex),
-    // not a 3D point, so centering the view no longer needs to preserve an
-    // offset back to the STL's original coordinate frame.
-    geometry.center();
+    // Selection is sent to the backend as face indices, not 3D points, so
+    // centering the view doesn't need to preserve an offset back to the
+    // STL's original coordinate frame for *that* — but the manual "connect
+    // corners" flow's marker positions come back from the backend in the
+    // STL's original (uncentered) frame, so the offset is captured here
+    // (equivalent to geometry.center(), just not discarded) for
+    // toSceneVec() to re-apply to those points later.
+    geometry.computeBoundingBox();
+    geometry.boundingBox.getCenter(meshCenterOffset);
+    geometry.translate(-meshCenterOffset.x, -meshCenterOffset.y, -meshCenterOffset.z);
 
     const baseColors = new Float32Array(geometry.attributes.position.count * 3);
     baseColors.fill(0.75);
@@ -145,6 +199,7 @@ function loadSTL(arrayBuffer) {
 
     const box = new THREE.Box3().setFromObject(mesh);
     const size = box.getSize(new THREE.Vector3()).length();
+    meshSize = size;
     const center = box.getCenter(new THREE.Vector3());
     camera.position.copy(center).add(new THREE.Vector3(size, size * 0.6, size));
     camera.near = size / 100;
@@ -153,9 +208,8 @@ function loadSTL(arrayBuffer) {
     controls.target.copy(center);
     controls.update();
 
-    selectedFaces = new Set();
-    lastOutline = null;
-    btnUnrollStl.disabled = true;
+    resetSelectionState();
+    exitConnectMode();
     stlStatsEl.innerHTML = '';
 }
 
@@ -175,11 +229,18 @@ function resetColors() {
     colorAttr.needsUpdate = true;
 }
 
+// Repaint every clicked region in its own click-indexed color — the live
+// feedback during the selection phase, before any connection math runs.
+function repaintClickedFaces() {
+    resetColors();
+    clickedFaces.forEach((c, i) => recolorFaces(c.regionFaceIndices, paletteColor(i)));
+}
+
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
 canvas3d.addEventListener('dblclick', async (e) => {
-    if (!mesh || !currentFile) return;
+    if (!mesh || !currentFile || connectModeActive) return;
     const rect = canvas3d.getBoundingClientRect();
     mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -188,58 +249,222 @@ canvas3d.addEventListener('dblclick', async (e) => {
     if (hits.length === 0) return;
 
     const hit = hits[0];
-
-    const extending = e.shiftKey && selectedFaces.size > 0;
+    const extending = e.shiftKey && clickedFaces.length > 0;
     if (!extending) {
-        selectedFaces = new Set();
-        resetColors();
+        resetSelectionState();
     }
-    recolorFaces([hit.faceIndex], new THREE.Color(1, 0.3, 0.2));
 
-    window.setStatus(extending ? 'Extending selection across fold...' : 'Unrolling selection...', true);
+    window.setStatus('Adding surface...', true);
     await window.ensureServerAwake();
-    window.setStatus(extending ? 'Extending selection across fold...' : 'Unrolling selection...', true);
+    window.setStatus('Adding surface...', true);
 
     try {
         const formData = new FormData();
         formData.append('file', currentFile);
         formData.append('click_face_index', hit.faceIndex);
-        formData.append('existing_faces', extending ? Array.from(selectedFaces).join(',') : '');
-
-        const resp = await fetch(`${window.API_URL}/unroll-mesh`, { method: 'POST', body: formData });
+        const resp = await fetch(`${window.API_URL}/grow-region`, { method: 'POST', body: formData });
         if (!resp.ok) {
             const err = await resp.json();
             throw new Error(err.detail || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        clickedFaces.push({ faceIndex: hit.faceIndex, regionFaceIndices: data.region_face_indices });
+        repaintClickedFaces();
 
-        selectedFaces = new Set(data.region_face_indices);
-        resetColors();
-        recolorFaces(data.region_face_indices, new THREE.Color(0.2, 0.8, 1));
-        lastOutline = data.outline;
-        btnUnrollStl.disabled = false;
+        // Any change to the face list invalidates the last preview/outline
+        // until the user re-previews.
+        lastChainResponse = null;
+        lastOutline = null;
+        btnUnrollStl.disabled = true;
+        connectionsListEl.innerHTML = '';
+        btnPreviewStl.disabled = false;
 
-        const disagreementClass = data.developability_disagreement_mm < 0.5 ? 'ok' : 'warn';
-        const warningsHtml = data.warnings.length
-            ? `<div class="warn">${data.warnings.join('<br>')}</div>` : '';
-        stlStatsEl.innerHTML = `
-            <div>Selected: <b>${data.region_face_count}</b> triangles</div>
-            <div>Disagreement: <span class="${disagreementClass}"><b>${data.developability_disagreement_mm.toFixed(3)} mm</b></span></div>
-            ${warningsHtml}
-        `;
-        window.setStatus('Shift+double-click to fold across an edge, or click "Unroll Selection" when ready.');
+        window.setStatus(`${clickedFaces.length} surface${clickedFaces.length > 1 ? 's' : ''} selected. `
+            + 'Shift+double-click to add another, or click "Set Connections" when ready.');
     } catch (err) {
-        // The clicked triangle was already painted red for instant feedback
-        // before this request was sent — on failure, restore whatever was
-        // actually selected before this click (nothing, if this was the
-        // first click) instead of leaving that single triangle stuck red,
-        // which looks like a real (but wrong) selection rather than a
-        // failed request.
-        resetColors();
-        if (selectedFaces.size > 0) {
-            recolorFaces(Array.from(selectedFaces), new THREE.Color(0.2, 0.8, 1));
-        }
         window.setStatus(`Error: ${err.message}`);
         console.error(err);
     }
 });
+
+btnPreviewStl.addEventListener('click', () => computeChain());
+
+async function computeChain() {
+    window.setStatus('Computing unrolled shape...', true);
+    await window.ensureServerAwake();
+    window.setStatus('Computing unrolled shape...', true);
+    try {
+        const formData = new FormData();
+        formData.append('file', currentFile);
+        formData.append('click_face_indices', clickedFaces.map(c => c.faceIndex).join(','));
+        formData.append('connection_overrides', JSON.stringify(connectionOverrides));
+
+        const resp = await fetch(`${window.API_URL}/unroll-mesh-chain`, { method: 'POST', body: formData });
+        if (!resp.ok) {
+            const err = await resp.json();
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        lastChainResponse = data;
+        lastOutline = data.outline;
+
+        resetColors();
+        recolorFaces(data.region_face_indices, new THREE.Color(0.2, 0.8, 1));
+        btnUnrollStl.disabled = false;
+
+        const warningsHtml = data.warnings.length
+            ? `<div class="warn">${data.warnings.join('<br>')}</div>` : '';
+        stlStatsEl.innerHTML = `
+            <div>Selected: <b>${data.region_face_count}</b> triangles</div>
+            ${warningsHtml}
+        `;
+        renderConnectionsList(data.connections);
+
+        const needsAttention = data.connections.some(c => c.needs_strut);
+        window.setStatus(needsAttention
+            ? 'Preview ready. Surfaces that aren\'t directly touching are connected automatically — '
+              + 'set specific corners below if you want, or click "Unwrap" to continue.'
+            : 'Preview ready. Click "Unwrap" when ready.');
+    } catch (err) {
+        window.setStatus(`Error: ${err.message}`);
+        console.error(err);
+    }
+}
+
+function renderConnectionsList(connections) {
+    connectionsListEl.innerHTML = '';
+    connections.forEach((c, i) => {
+        if (!c.needs_strut) return; // a real touching connection needs no configuration
+        const row = document.createElement('div');
+        row.className = 'connection-row needs-attention';
+        const manual = Object.prototype.hasOwnProperty.call(connectionOverrides, String(i));
+        row.innerHTML = `<span>Connection ${i + 1}↔${i + 2}: `
+            + `${manual ? 'corners set manually' : 'connected automatically'}</span>`;
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary btn-fix';
+        btn.textContent = manual ? 'Change Corners' : 'Set Corners';
+        btn.addEventListener('click', () => enterConnectModeForConnection(i, c));
+        row.appendChild(btn);
+        connectionsListEl.appendChild(row);
+    });
+}
+
+// --- Corner connection picking ---
+
+function toSceneVec(pt) {
+    // pt = [vertexIndex, x, y, z, ...] in the STL's original (uncentered)
+    // coordinate frame — offset it the same way loadSTL() centered the
+    // displayed mesh geometry, or markers won't line up with the mesh.
+    return new THREE.Vector3(pt[1], pt[2], pt[3]).sub(meshCenterOffset);
+}
+
+function clearConnectMarkers() {
+    if (connectMarkerGroup) {
+        scene.remove(connectMarkerGroup);
+        connectMarkerGroup.traverse(o => { if (o.material) o.material.dispose(); });
+        if (connectMarkerGroup.children.length > 0) {
+            connectMarkerGroup.children[0].geometry.dispose();
+        }
+        connectMarkerGroup = null;
+    }
+    if (connectLineGroup) {
+        scene.remove(connectLineGroup);
+        connectLineGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+        connectLineGroup = null;
+    }
+    connectPicks = [];
+}
+
+function buildConnectMarkers(loopA, loopB) {
+    connectMarkerGroup = new THREE.Group();
+    const geo = new THREE.SphereGeometry(meshSize * 0.006, 12, 12);
+    const addSide = (loopData, side) => {
+        for (const pt of loopData) {
+            const groupId = pt[4];
+            const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: paletteColor(groupId) }));
+            m.position.copy(toSceneVec(pt));
+            m.userData = { side, vertexIndex: pt[0] };
+            connectMarkerGroup.add(m);
+        }
+    };
+    addSide(loopA, 1);
+    addSide(loopB, 2);
+    scene.add(connectMarkerGroup);
+    connectLineGroup = new THREE.Group();
+    scene.add(connectLineGroup);
+}
+
+function exitConnectMode() {
+    connectModeActive = false;
+    activeConnectionIndex = -1;
+    clearConnectMarkers();
+    btnCancelConnect.classList.add('hidden');
+    connectInstructions.classList.add('hidden');
+    btnPreviewStl.disabled = clickedFaces.length === 0;
+    btnUnrollStl.disabled = !lastOutline;
+}
+
+function enterConnectModeForConnection(i, connectionData) {
+    connectModeActive = true;
+    activeConnectionIndex = i;
+    connectPicks = [];
+    buildConnectMarkers(connectionData.loop_a, connectionData.loop_b);
+    btnCancelConnect.classList.remove('hidden');
+    connectInstructions.classList.remove('hidden');
+    btnPreviewStl.disabled = true;
+    btnUnrollStl.disabled = true;
+    window.setStatus(`Setting corners for connection ${i + 1}↔${i + 2} — pick your first pair of matching corners (see instructions above).`);
+}
+
+btnCancelConnect.addEventListener('click', () => {
+    exitConnectMode();
+    window.setStatus('Click "Unwrap" when ready, or set another connection\'s corners above.');
+});
+
+canvas3d.addEventListener('click', (e) => {
+    if (!connectModeActive || !connectMarkerGroup) return;
+    const rect = canvas3d.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(connectMarkerGroup.children);
+    if (hits.length === 0) return;
+
+    const marker = hits[0].object;
+    const side = marker.userData.side;
+    const expectedSide = connectPicks.length % 2 === 0 ? 1 : 2;
+    if (side !== expectedSide) {
+        window.setStatus(`Click a corner on the ${expectedSide === 1 ? 'left' : 'right'} surface next.`);
+        return;
+    }
+
+    marker.material.color.set(0x33ff33);
+    connectPicks.push({ side, vertexIndex: marker.userData.vertexIndex, pos: marker.position.clone() });
+
+    if (connectPicks.length % 2 === 0) {
+        const a = connectPicks[connectPicks.length - 2].pos;
+        const b = connectPicks[connectPicks.length - 1].pos;
+        const lineGeo = new THREE.BufferGeometry().setFromPoints([a, b]);
+        const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x33ff33 }));
+        connectLineGroup.add(line);
+    }
+
+    if (connectPicks.length === 4) {
+        submitManualConnect();
+    } else if (connectPicks.length % 2 === 1) {
+        window.setStatus(`Now click the matching corner on the ${side === 1 ? 'right' : 'left'} surface.`);
+    } else {
+        window.setStatus('First connection point set. Click a corner on the left surface for the second connection point.');
+    }
+});
+
+async function submitManualConnect() {
+    const bySide = { 1: [], 2: [] };
+    for (const p of connectPicks) bySide[p.side].push(p.vertexIndex);
+    connectionOverrides[String(activeConnectionIndex)] = [
+        [bySide[1][0], bySide[2][0]],
+        [bySide[1][1], bySide[2][1]],
+    ];
+    exitConnectMode();
+    await computeChain();
+}

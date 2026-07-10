@@ -29,10 +29,25 @@
 
             <div id="stl-panel" class="hidden">
                 <h2>3D Face Selection</h2>
-                <div class="hint">Double-click a flat surface to select it.
-                Shift+double-click another surface to fold the sensor across
-                an edge/corner onto it.</div>
-                <button class="btn btn-primary" id="btn-unroll-stl" disabled>Unroll Selection</button>
+                <div class="hint"><b>1. Select surfaces</b> — double-click a
+                flat surface, shift+double-click to add more (each gets its
+                own color). <b>2. Set connections</b> — for surfaces that
+                aren't directly touching, choose which corners join them
+                (or leave it automatic). <b>3. Unwrap</b> — flatten the
+                selection into a 2D outline.</div>
+                <button class="btn btn-secondary" id="btn-preview-stl" disabled>Set Connections</button>
+                <button class="btn btn-primary" id="btn-unroll-stl" disabled>Unwrap</button>
+                <div id="connections-list"></div>
+                <button class="btn btn-secondary hidden" id="btn-cancel-connect">Cancel</button>
+                <div id="connect-instructions" class="hint hidden">
+                    <b>Pick connection corners:</b>
+                    <ol>
+                        <li>Click a corner marker on the <b>left</b> surface (colored by which original click it came from).</li>
+                        <li>Click the matching corner on the <b>right</b> surface — draws a <span style="color:#33cc33"><b>green</b></span> connecting line.</li>
+                        <li>Repeat once more, picking a second pair of matching corners.</li>
+                        <li>After 4 clicks (2 pairs) it connects automatically. "Cancel" backs out anytime.</li>
+                    </ol>
+                </div>
                 <button class="btn btn-secondary" id="btn-cancel-stl">Cancel</button>
                 <div id="stl-stats"></div>
             </div>
