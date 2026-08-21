@@ -1,1040 +1,1521 @@
-// ============================================================
-// Configuration
-// ============================================================
-const API_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-    ? "http://localhost:8000"
-    : "https://custom-pcb-dev.onrender.com";
-// stl_viewer.js is a separate ES module (three.js is modules-only) and can't
-// see this const directly — const/let don't attach to window the way
-// top-level function declarations do, so expose it explicitly.
-window.API_URL = API_URL;
+// PCB generation UI: outline editor + parameters + POST /generate + SVG/zip.
+// The outline can come from hand-drawing, a selected STL face (stl-viewer.js),
+// or a DXF import (dxf-import.js). A second, optional polygon (the "sensorize
+// zone") constrains where sensors get packed inside the outline.
+import { API_BASE } from "./config.js";
+import { createRouteEditor } from "./route-editor.js";
 
-// ============================================================
-// Geometry helpers
-// ============================================================
-function signedArea(pts) {
-    // Shoelace formula — positive = CCW, negative = CW
-    let area = 0;
-    for (let i = 0; i < pts.length; i++) {
-        const j = (i + 1) % pts.length;
-        area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
-    }
-    return area / 2;
-}
-
-function ensureCCW(pts) {
-    if (signedArea(pts) < 0) {
-        // CW — reverse but keep first vertex in place
-        // Reverse all, then rotate so vertex 0 stays vertex 0
-        const reversed = [pts[0], ...pts.slice(1).reverse()];
-        return reversed;
-    }
-    return pts;
-}
-
-function rotateForCable(pts) {
-    // Rotate outline so edge 1→2 is horizontal at the bottom.
-    // Matches MATLAB rotateForCable() and Python rotate_for_cable().
-    const p1 = pts[0], p2 = pts[1];
-    const ex = p2[0] - p1[0], ey = p2[1] - p1[1];
-    const ang = Math.atan2(ey, ex);
-    const c = Math.cos(-ang), s = Math.sin(-ang);
-
-    const midx = (p1[0] + p2[0]) / 2;
-    const midy = (p1[1] + p2[1]) / 2;
-
-    let rotated = pts.map(([x, y]) => {
-        const dx = x - midx, dy = y - midy;
-        return [c * dx - s * dy, s * dx + c * dy];
-    });
-
-    // Centroid should be above edge (Y > 0)
-    const cx = rotated.reduce((s, p) => s + p[0], 0) / rotated.length;
-    const cy = rotated.reduce((s, p) => s + p[1], 0) / rotated.length;
-    if (cy < 0) {
-        rotated = rotated.map(([x, y]) => [-x, -y]);
-    }
-
-    // Ensure p1 is left of p2
-    if (rotated[0][0] > rotated[1][0]) {
-        [rotated[0], rotated[1]] = [rotated[1], rotated[0]];
-    }
-
-    return rotated;
-}
-
-// ============================================================
-// State
-// ============================================================
-let outline = [];          // Array of [x, y] in mm
-let fillRegion = [];       // Array of [x, y] in mm — optional sensor-fill region
-let drawMode = null;       // null | "outline" | "fill" | "pick-edge"
-let draggingWhich = null;  // null | "outline" | "fill"
-let draggingIdx = -1;
-let lastResult = null;     // Store ZIP for download
-
-// DXF import — a polygon awaiting cable-edge selection before it becomes `outline`
-let pendingImportLoop = [];
-let hoveredEdgeIdx = -1;
-
-// Canvas state
-const canvas = document.getElementById("canvas");
+const canvas = document.getElementById("outline-canvas");
 const ctx = canvas.getContext("2d");
-let viewScale = 1;
-let viewOffsetX = 0;
-let viewOffsetY = 0;
+const outlineInfo = document.getElementById("outline-info");
 
-// ============================================================
-// UI References
-// ============================================================
-const presetSelect = document.getElementById("preset-select");
-const btnDraw = document.getElementById("btn-draw");
-const btnImportDxf = document.getElementById("btn-import-dxf");
-const dxfFileInput = document.getElementById("dxf-file-input");
-const btnDrawFill = document.getElementById("btn-draw-fill");
-const btnClear = document.getElementById("btn-clear");
-const btnGenerate = document.getElementById("btn-generate");
-const btnDownload = document.getElementById("btn-download");
-const statusText = document.getElementById("status-text");
-const coordDisplay = document.getElementById("coord-display");
-const vertexCount = document.getElementById("vertex-count");
-const previewPanel = document.getElementById("preview-panel");
-const svgContainer = document.getElementById("svg-container");
-const statsGrid = document.getElementById("stats-grid");
-const drcStatus = document.getElementById("drc-status");
+// Vertices are stored in mm (y-up), in click order. First two = cable edge.
+// `vertices` is the board outline; `fillVertices` is the optional sensorize
+// zone. `editTarget` selects which array the drawing tools currently act on.
+let vertices = [];
+let fillVertices = [];
+let editTarget = "outline"; // "outline" | "fill"
+let foldLines = [];
+let selected = null;
+let mode = "select";
+let dragState = null;
+let panState = null;
+let previewPoint = null;
+let arcState = null;
+let angleReferenceEdge = null;
+let spacePanActive = false;
+let undoStack = [];
+let redoStack = [];
 
-// ============================================================
-// Init
-// ============================================================
-function init() {
-    // Populate presets
-    for (const name in PRESETS) {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name;
-        presetSelect.appendChild(opt);
-    }
+// View transform: which mm point sits at the canvas centre, and px-per-mm.
+const view = { scale: 4, cx: 0, cy: 0 };
 
-    presetSelect.addEventListener("change", loadPreset);
-    btnDraw.addEventListener("click", toggleDraw);
-    btnImportDxf.addEventListener("click", () => dxfFileInput.click());
-    dxfFileInput.addEventListener("change", onDxfFileSelected);
-    btnDrawFill.addEventListener("click", toggleDrawFill);
-    btnClear.addEventListener("click", clearOutline);
-    btnGenerate.addEventListener("click", generate);
-    btnDownload.addEventListener("click", downloadZip);
+function activeArray() { return editTarget === "fill" ? fillVertices : vertices; }
+function setActiveArray(next) { if (editTarget === "fill") fillVertices = next; else vertices = next; }
 
-    canvas.addEventListener("click", onCanvasClick);
-    canvas.addEventListener("mousemove", onCanvasMove);
-    canvas.addEventListener("mousedown", onCanvasDown);
-    canvas.addEventListener("mouseup", onCanvasUp);
-    canvas.addEventListener("dblclick", onCanvasDblClick);
+const cadButtons = {
+  select: document.getElementById("cad-select"),
+  line: document.getElementById("cad-line"),
+  rect: document.getElementById("cad-rect"),
+  hline: document.getElementById("cad-hline"),
+  vline: document.getElementById("cad-vline"),
+  arc: document.getElementById("cad-arc"),
+};
+const cadUndoBtn = document.getElementById("cad-undo");
+const cadRedoBtn = document.getElementById("cad-redo");
+const cadDeleteBtn = document.getElementById("cad-delete");
+const cadSetCableBtn = document.getElementById("cad-set-cable");
+const cadSetAngleRefBtn = document.getElementById("cad-set-angle-ref");
+const cadZoomOutBtn = document.getElementById("cad-zoom-out");
+const cadZoomInBtn = document.getElementById("cad-zoom-in");
+const cadFitBtn = document.getElementById("cad-fit");
+const cadLengthInput = document.getElementById("cad-length");
+const cadAngleInput = document.getElementById("cad-angle-value");
+const cadWidthInput = document.getElementById("cad-width");
+const cadHeightInput = document.getElementById("cad-height");
+const cadGridInput = document.getElementById("cad-grid");
+const cadSnapInput = document.getElementById("cad-snap");
+const cadTargetOutlineBtn = document.getElementById("cad-target-outline");
+const cadTargetFillBtn = document.getElementById("cad-target-fill");
+const fillZoneHint = document.getElementById("fill-zone-hint");
+const clearOutlineBtn = document.getElementById("clear-outline");
+const cableEdgeBanner = document.getElementById("cable-edge-banner");
+const cableEdgeBannerClose = document.getElementById("cable-edge-banner-close");
 
-    window.addEventListener("resize", resizeCanvas);
-    resizeCanvas();
+function resetView() { view.scale = 4; view.cx = 0; view.cy = 0; }
+function fitViewTo(verts) {
+  if (!verts.length) { resetView(); return; }
+  const xs = verts.map((v) => v[0]), ys = verts.map((v) => v[1]);
+  const minx = Math.min(...xs), maxx = Math.max(...xs);
+  const miny = Math.min(...ys), maxy = Math.max(...ys);
+  view.cx = (minx + maxx) / 2;
+  view.cy = (miny + maxy) / 2;
+  const w = Math.max(maxx - minx, 1e-3), h = Math.max(maxy - miny, 1e-3), margin = 26;
+  view.scale = Math.max(0.05, Math.min((canvas.width - 2 * margin) / w, (canvas.height - 2 * margin) / h));
 }
 
-function resizeCanvas() {
-    const container = canvas.parentElement;
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
-    fitView();
-    render();
+function zoomView(factor, anchorPx = null) {
+  const anchor = anchorPx || [canvas.width / 2, canvas.height / 2];
+  const before = pxToMm(anchor[0], anchor[1]);
+  const nextScale = Math.max(0.03, Math.min(120, view.scale * factor));
+  if (Math.abs(nextScale - view.scale) < 1e-9) return;
+  view.scale = nextScale;
+  const after = pxToMm(anchor[0], anchor[1]);
+  view.cx += before[0] - after[0];
+  view.cy += before[1] - after[1];
+  redraw();
 }
 
-// ============================================================
-// View transform: mm -> canvas pixels
-// ============================================================
-function fitView(points) {
-    points = points || (outline.length >= 2 ? outline : pendingImportLoop);
-    if (points.length < 2) {
-        // Default view: -50 to 50 mm
-        const span = 100;
-        viewScale = Math.min(canvas.width, canvas.height) / span * 0.8;
-        viewOffsetX = canvas.width / 2;
-        viewOffsetY = canvas.height / 2;
-        return;
-    }
-    const xs = points.map(p => p[0]);
-    const ys = points.map(p => p[1]);
-    const xmin = Math.min(...xs), xmax = Math.max(...xs);
-    const ymin = Math.min(...ys), ymax = Math.max(...ys);
-    const w = xmax - xmin || 40;
-    const h = ymax - ymin || 40;
-    const margin = 1.3;
-    viewScale = Math.min(canvas.width / (w * margin), canvas.height / (h * margin));
-    viewOffsetX = canvas.width / 2 - ((xmin + xmax) / 2) * viewScale;
-    viewOffsetY = canvas.height / 2 + ((ymin + ymax) / 2) * viewScale;  // Y-flip
+function fitOutlineView() {
+  const combined = vertices.concat(fillVertices);
+  fitViewTo(combined.length ? combined : activeArray());
+  redraw();
 }
 
-function mmToCanvas(x, y) {
-    return [x * viewScale + viewOffsetX, -y * viewScale + viewOffsetY];
+function pxToMm(px, py) {
+  return [(px - canvas.width / 2) / view.scale + view.cx,
+          (canvas.height / 2 - py) / view.scale + view.cy];
+}
+function mmToPx(mx, my) {
+  return [(mx - view.cx) * view.scale + canvas.width / 2,
+          canvas.height / 2 - (my - view.cy) * view.scale];
 }
 
-function canvasToMm(cx, cy) {
-    return [(cx - viewOffsetX) / viewScale, -(cy - viewOffsetY) / viewScale];
+function cloneVertices(src) {
+  return src.map((p) => p.slice());
 }
 
-// ============================================================
-// Rendering
-// ============================================================
-function render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+function pushUndo() {
+  undoStack.push({
+    vertices: cloneVertices(vertices),
+    fillVertices: cloneVertices(fillVertices),
+    foldLines: foldLines.map(([a, b]) => [a.slice(), b.slice()]),
+  });
+  if (undoStack.length > 80) undoStack.shift();
+  redoStack = [];
+  updateCadButtons();
+}
 
-    // Grid
-    drawGrid();
+function restoreSnapshot(snapshot) {
+  vertices = cloneVertices(snapshot.vertices);
+  fillVertices = cloneVertices(snapshot.fillVertices || []);
+  foldLines = snapshot.foldLines.map(([a, b]) => [a.slice(), b.slice()]);
+  selected = null;
+  previewPoint = null;
+  arcState = null;
+  angleReferenceEdge = null;
+  redraw();
+  setOutlineInfo();
+  syncDimensionFields();
+  updateCadButtons();
+}
 
-    // Outline polygon
-    if (outline.length > 0) {
-        ctx.beginPath();
-        const [sx, sy] = mmToCanvas(outline[0][0], outline[0][1]);
-        ctx.moveTo(sx, sy);
-        for (let i = 1; i < outline.length; i++) {
-            const [px, py] = mmToCanvas(outline[i][0], outline[i][1]);
-            ctx.lineTo(px, py);
-        }
-        if (drawMode !== "outline" && outline.length > 2) {
-            ctx.closePath();
-            ctx.fillStyle = "rgba(0, 113, 227, 0.06)";
-            ctx.fill();
-        }
-        ctx.strokeStyle = "#0071e3";
-        ctx.lineWidth = 2;
-        ctx.stroke();
+function snapPoint(p) {
+  if (!cadSnapInput.checked) return p;
+  const grid = Math.max(0.001, parseFloat(cadGridInput.value) || 1);
+  return [Math.round(p[0] / grid) * grid, Math.round(p[1] / grid) * grid];
+}
 
-        // Vertices
-        for (let i = 0; i < outline.length; i++) {
-            const [vx, vy] = mmToCanvas(outline[i][0], outline[i][1]);
-            ctx.beginPath();
-            ctx.arc(vx, vy, 5, 0, Math.PI * 2);
-            ctx.fillStyle = i === 0 ? "#ff3b30" : "#0071e3";
-            ctx.fill();
-            ctx.strokeStyle = "white";
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-        }
+function constrainPoint(start, raw, event) {
+  let p = raw;
+  if (mode === "hline") p = [raw[0], start[1]];
+  if (mode === "vline") p = [start[0], raw[1]];
+  if (event && event.shiftKey && !["hline", "vline"].includes(mode)) {
+    const dx = raw[0] - start[0];
+    const dy = raw[1] - start[1];
+    p = Math.abs(dx) >= Math.abs(dy) ? [raw[0], start[1]] : [start[0], raw[1]];
+  }
+  return snapPoint(p);
+}
 
-        // Edge 1 indicator (cable attach edge)
-        if (outline.length >= 2 && drawMode !== "outline") {
-            const [ax, ay] = mmToCanvas(outline[0][0], outline[0][1]);
-            const [bx, by] = mmToCanvas(outline[1][0], outline[1][1]);
-            ctx.beginPath();
-            ctx.moveTo(ax, ay);
-            ctx.lineTo(bx, by);
-            ctx.strokeStyle = "#ff9500";
-            ctx.lineWidth = 3;
-            ctx.stroke();
-            // Label
-            const mx = (ax + bx) / 2, my = (ay + by) / 2;
-            ctx.font = "11px sans-serif";
-            ctx.fillStyle = "#ff9500";
-            ctx.fillText("cable edge", mx + 5, my - 5);
-        }
+function eventMm(event) {
+  const [px, py] = eventCanvasPx(event);
+  return snapPoint(pxToMm(px, py));
+}
+
+function eventCanvasPx(event) {
+  const rect = canvas.getBoundingClientRect();
+  const px = (event.clientX - rect.left) * (canvas.width / rect.width);
+  const py = (event.clientY - rect.top) * (canvas.height / rect.height);
+  return [px, py];
+}
+
+function startPan(event) {
+  panState = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    cx: view.cx,
+    cy: view.cy,
+  };
+  canvas.classList.add("is-panning");
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
+}
+
+function updatePan(event) {
+  const rect = canvas.getBoundingClientRect();
+  const dx = (event.clientX - panState.x) * (canvas.width / rect.width) / view.scale;
+  const dy = (event.clientY - panState.y) * (canvas.height / rect.height) / view.scale;
+  view.cx = panState.cx - dx;
+  view.cy = panState.cy + dy;
+  redraw();
+}
+
+function stopPan(event) {
+  if (!panState || event.pointerId !== panState.pointerId) return false;
+  panState = null;
+  canvas.classList.remove("is-panning");
+  canvas.releasePointerCapture(event.pointerId);
+  return true;
+}
+
+function isTypingTarget(target) {
+  const tag = target?.tagName?.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable;
+}
+
+function edgeAt(i) {
+  const verts = activeArray();
+  return [verts[i], verts[(i + 1) % verts.length]];
+}
+
+function edgeLength(i) {
+  const [a, b] = edgeAt(i);
+  return Math.hypot(b[0] - a[0], b[1] - a[1]);
+}
+
+function edgeAngle(i) {
+  const [a, b] = edgeAt(i);
+  return Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
+}
+
+function normalizeAngleDeg(angle) {
+  let a = ((angle + 180) % 360 + 360) % 360 - 180;
+  return Object.is(a, -0) ? 0 : a;
+}
+
+function validEdgeIndex(i) {
+  const verts = activeArray();
+  const edgeCount = verts.length >= 3 ? verts.length : Math.max(0, verts.length - 1);
+  return Number.isInteger(i) && i >= 0 && i < edgeCount;
+}
+
+function relativeEdgeAngle(refIndex, targetIndex) {
+  if (!validEdgeIndex(refIndex) || !validEdgeIndex(targetIndex)) return null;
+  return normalizeAngleDeg(edgeAngle(targetIndex) - edgeAngle(refIndex));
+}
+
+function sampleArcPoints(center, start, end) {
+  const radius = Math.hypot(start[0] - center[0], start[1] - center[1]);
+  if (radius < 1e-6) return [];
+  const startAngle = Math.atan2(start[1] - center[1], start[0] - center[0]);
+  const endAngle = Math.atan2(end[1] - center[1], end[0] - center[0]);
+  let delta = endAngle - startAngle;
+  while (delta <= -Math.PI) delta += Math.PI * 2;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  if (Math.abs(delta) < Math.PI / 180) return [];
+  const segments = Math.max(8, Math.ceil(Math.abs(delta) / (Math.PI / 18)));
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const angle = startAngle + delta * t;
+    pts.push(snapPoint([
+      center[0] + radius * Math.cos(angle),
+      center[1] + radius * Math.sin(angle),
+    ]));
+  }
+  return pts;
+}
+
+function appendArcPoints(points) {
+  if (!points.length) return;
+  if (editTarget === "outline" && foldLines.length) foldLines = [];
+  const verts = activeArray();
+  const merged = points.slice();
+  if (verts.length && Math.hypot(verts[verts.length - 1][0] - merged[0][0], verts[verts.length - 1][1] - merged[0][1]) <= 1e-6) {
+    merged.shift();
+  }
+  setActiveArray(verts.concat(merged));
+}
+
+function polygonBounds() {
+  const verts = activeArray();
+  if (!verts.length) return null;
+  const xs = verts.map((p) => p[0]);
+  const ys = verts.map((p) => p[1]);
+  return { minx: Math.min(...xs), maxx: Math.max(...xs), miny: Math.min(...ys), maxy: Math.max(...ys) };
+}
+
+function pointSegDistance(p, a, b) {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const len2 = vx * vx + vy * vy;
+  const t = len2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / len2)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * vx), p[1] - (a[1] + t * vy));
+}
+
+function pointInPoly(p) {
+  const verts = activeArray();
+  let inside = false;
+  for (let i = 0, j = verts.length - 1; i < verts.length; j = i++) {
+    const xi = verts[i][0], yi = verts[i][1];
+    const xj = verts[j][0], yj = verts[j][1];
+    if (((yi > p[1]) !== (yj > p[1])) &&
+        (p[0] < (xj - xi) * (p[1] - yi) / ((yj - yi) || 1e-12) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function hitTest(p) {
+  const verts = activeArray();
+  const tol = 8 / view.scale;
+  for (let i = 0; i < verts.length; i++) {
+    if (Math.hypot(verts[i][0] - p[0], verts[i][1] - p[1]) <= tol) return { type: "vertex", index: i };
+  }
+  if (verts.length >= 2) {
+    const edgeCount = verts.length >= 3 ? verts.length : verts.length - 1;
+    for (let i = 0; i < edgeCount; i++) {
+      const [a, b] = edgeAt(i);
+      if (pointSegDistance(p, a, b) <= tol) return { type: "edge", index: i };
     }
-
-    // Sensor fill region polygon
-    if (fillRegion.length > 0) {
-        ctx.beginPath();
-        const [sx, sy] = mmToCanvas(fillRegion[0][0], fillRegion[0][1]);
-        ctx.moveTo(sx, sy);
-        for (let i = 1; i < fillRegion.length; i++) {
-            const [px, py] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
-            ctx.lineTo(px, py);
-        }
-        if (drawMode !== "fill" && fillRegion.length > 2) {
-            ctx.closePath();
-            ctx.fillStyle = "rgba(52, 199, 89, 0.12)";
-            ctx.fill();
-        }
-        ctx.strokeStyle = "#34c759";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Vertices
-        for (let i = 0; i < fillRegion.length; i++) {
-            const [vx, vy] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
-            ctx.beginPath();
-            ctx.arc(vx, vy, 5, 0, Math.PI * 2);
-            ctx.fillStyle = "#34c759";
-            ctx.fill();
-            ctx.strokeStyle = "white";
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-        }
-    }
-
-    // DXF import awaiting cable-edge selection
-    if (drawMode === "pick-edge" && pendingImportLoop.length > 0) {
-        ctx.beginPath();
-        const [sx, sy] = mmToCanvas(pendingImportLoop[0][0], pendingImportLoop[0][1]);
-        ctx.moveTo(sx, sy);
-        for (let i = 1; i < pendingImportLoop.length; i++) {
-            const [px, py] = mmToCanvas(pendingImportLoop[i][0], pendingImportLoop[i][1]);
-            ctx.lineTo(px, py);
-        }
-        ctx.closePath();
-        ctx.fillStyle = "rgba(175, 82, 222, 0.06)";
-        ctx.fill();
-        ctx.strokeStyle = "#af52de";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Highlight the hovered edge as the candidate cable edge
-        if (hoveredEdgeIdx >= 0) {
-            const n = pendingImportLoop.length;
-            const [ax, ay] = mmToCanvas(
-                pendingImportLoop[hoveredEdgeIdx][0], pendingImportLoop[hoveredEdgeIdx][1]);
-            const [bx, by] = mmToCanvas(
-                pendingImportLoop[(hoveredEdgeIdx + 1) % n][0],
-                pendingImportLoop[(hoveredEdgeIdx + 1) % n][1]);
-            ctx.beginPath();
-            ctx.moveTo(ax, ay);
-            ctx.lineTo(bx, by);
-            ctx.strokeStyle = "#ff9500";
-            ctx.lineWidth = 4;
-            ctx.stroke();
-        }
-    }
-
-    // Instructions
-    if (outline.length === 0 && !drawMode) {
-        ctx.font = "16px sans-serif";
-        ctx.fillStyle = "#86868b";
-        ctx.textAlign = "center";
-        ctx.fillText("Select a preset or click 'Draw Outline' to start", canvas.width / 2, canvas.height / 2);
-        ctx.textAlign = "start";
-    }
-
-    if (drawMode === "outline") {
-        ctx.font = "12px sans-serif";
-        ctx.fillStyle = "#ff3b30";
-        ctx.fillText("Click to place vertices. Double-click or click near first vertex to close.", 12, 20);
-    } else if (drawMode === "fill") {
-        ctx.font = "12px sans-serif";
-        ctx.fillStyle = "#ff3b30";
-        ctx.fillText("Click to place sensor-fill vertices. Double-click or click near first vertex to close.", 12, 20);
-    } else if (drawMode === "pick-edge") {
-        ctx.font = "12px sans-serif";
-        ctx.fillStyle = "#af52de";
-        ctx.fillText("Hover an edge (highlighted orange) and click to set it as the cable edge.", 12, 20);
-    }
-
-    updateUI();
+  }
+  if (verts.length >= 3 && pointInPoly(p)) return { type: "outline" };
+  return null;
 }
 
 function drawGrid() {
-    // Determine grid spacing in mm
-    const pixelPerMm = viewScale;
-    let gridMm = 1;
-    if (pixelPerMm < 3) gridMm = 20;
-    else if (pixelPerMm < 8) gridMm = 10;
-    else if (pixelPerMm < 20) gridMm = 5;
-    else if (pixelPerMm < 40) gridMm = 2;
-
-    const [xminMm, yminMm] = canvasToMm(0, canvas.height);
-    const [xmaxMm, ymaxMm] = canvasToMm(canvas.width, 0);
-
-    ctx.beginPath();
-    ctx.strokeStyle = "#e8e8ed";
-    ctx.lineWidth = 0.5;
-
-    const startX = Math.floor(xminMm / gridMm) * gridMm;
-    const startY = Math.floor(yminMm / gridMm) * gridMm;
-
-    for (let x = startX; x <= xmaxMm; x += gridMm) {
-        const [cx] = mmToCanvas(x, 0);
-        ctx.moveTo(cx, 0);
-        ctx.lineTo(cx, canvas.height);
-    }
-    for (let y = startY; y <= ymaxMm; y += gridMm) {
-        const [, cy] = mmToCanvas(0, y);
-        ctx.moveTo(0, cy);
-        ctx.lineTo(canvas.width, cy);
-    }
-    ctx.stroke();
-
-    // Axes
-    ctx.beginPath();
-    ctx.strokeStyle = "#d2d2d7";
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const [mmL, mmT] = pxToMm(0, 0);
+  const [mmR, mmB] = pxToMm(canvas.width, canvas.height);
+  const step = 5; // mm
+  const nx = Math.abs(mmR - mmL) / step, ny = Math.abs(mmT - mmB) / step;
+  if (nx < 200 && ny < 200) {
+    ctx.strokeStyle = "#1b2530";
     ctx.lineWidth = 1;
-    const [ox, oy] = mmToCanvas(0, 0);
-    ctx.moveTo(ox, 0); ctx.lineTo(ox, canvas.height);
-    ctx.moveTo(0, oy); ctx.lineTo(canvas.width, oy);
-    ctx.stroke();
-}
-
-// ============================================================
-// Drawing mode
-// ============================================================
-function toggleDraw() {
-    if (drawMode === "outline") {
-        if (outline.length >= 3) {
-            finishDrawing();
-            return;
-        }
-        drawMode = null;
-        btnDraw.textContent = "Draw Outline";
-        btnDraw.classList.remove("active");
-        canvas.style.cursor = "default";
-    } else if (drawMode === null) {
-        drawMode = "outline";
-        outline = [];
-        fillRegion = [];
-        btnDraw.textContent = "Stop Drawing";
-        btnDraw.classList.add("active");
-        canvas.style.cursor = "crosshair";
-        previewPanel.classList.add("hidden");
-        lastResult = null;
+    for (let mx = Math.floor(Math.min(mmL, mmR) / step) * step; mx <= Math.max(mmL, mmR); mx += step) {
+      const [px] = mmToPx(mx, 0);
+      ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, canvas.height); ctx.stroke();
     }
-    render();
-}
-
-function toggleDrawFill() {
-    if (outline.length < 3) return;
-    if (drawMode === "fill") {
-        if (fillRegion.length >= 3) {
-            finishDrawingFill();
-            return;
-        }
-        drawMode = null;
-        btnDrawFill.textContent = "Draw Sensor Fill";
-        btnDrawFill.classList.remove("active");
-        canvas.style.cursor = "default";
-    } else if (drawMode === null) {
-        drawMode = "fill";
-        fillRegion = [];
-        btnDrawFill.textContent = "Stop Drawing";
-        btnDrawFill.classList.add("active");
-        canvas.style.cursor = "crosshair";
-        previewPanel.classList.add("hidden");
-        lastResult = null;
+    for (let my = Math.floor(Math.min(mmT, mmB) / step) * step; my <= Math.max(mmT, mmB); my += step) {
+      const [, py] = mmToPx(0, my);
+      ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(canvas.width, py); ctx.stroke();
     }
-    render();
+  }
+  // origin axes
+  ctx.strokeStyle = "#2c3a48";
+  const [ox, oy] = mmToPx(0, 0);
+  ctx.beginPath();
+  ctx.moveTo(ox, 0); ctx.lineTo(ox, canvas.height);
+  ctx.moveTo(0, oy); ctx.lineTo(canvas.width, oy);
+  ctx.stroke();
 }
 
-// ============================================================
-// DXF import
-// ============================================================
-async function onDxfFileSelected(e) {
-    const file = e.target.files[0];
-    dxfFileInput.value = "";  // allow re-selecting the same file later
-    if (!file) return;
-    await importDxf(file);
-}
+function drawOutlinePolygon() {
+  if (!vertices.length) return;
+  ctx.beginPath();
+  vertices.forEach(([mx, my], i) => {
+    const [px, py] = mmToPx(mx, my);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  if (vertices.length >= 3) ctx.closePath();
+  ctx.fillStyle = "rgba(79,157,255,0.12)";
+  ctx.strokeStyle = "#4f9dff";
+  ctx.lineWidth = 1.5;
+  if (vertices.length >= 3) ctx.fill();
+  ctx.stroke();
 
-async function importDxf(file) {
-    setStatus("Importing DXF...", true);
-    await ensureServerAwake();
-    setStatus("Importing DXF...", true);
+  if (vertices.length >= 2) {
+    const [ax, ay] = mmToPx(...vertices[0]);
+    const [bx, by] = mmToPx(...vertices[1]);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 3.5; ctx.stroke();
+  }
 
-    try {
-        const formData = new FormData();
-        formData.append("file", file);
-        const resp = await fetch(`${API_URL}/import-dxf`, {
-            method: "POST",
-            body: formData,
-        });
-
-        if (!resp.ok) {
-            const err = await resp.json();
-            throw new Error(err.detail || `HTTP ${resp.status}`);
-        }
-
-        const data = await resp.json();
-
-        drawMode = "pick-edge";
-        pendingImportLoop = data.loops[data.chosen_index];
-        hoveredEdgeIdx = -1;
-        outline = [];
-        fillRegion = [];
-        previewPanel.classList.add("hidden");
-        lastResult = null;
-        canvas.style.cursor = "crosshair";
-
-        const warningText = data.warnings.length ? ` (${data.warnings.join(" ")})` : "";
-        setStatus(`DXF imported — click the edge where the cable should exit${warningText}`);
-
-        fitView();
-        render();
-    } catch (err) {
-        setStatus(`Error importing DXF: ${err.message}`);
-        console.error(err);
+  // Shared edges retained by the unfolding tree. These are bend/fold guides,
+  // not cuts in the PCB outline.
+  if (foldLines.length) {
+    ctx.save();
+    ctx.strokeStyle = "#ff9f43";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([7, 5]);
+    for (const [a, b] of foldLines) {
+      const [ax, ay] = mmToPx(a[0], a[1]);
+      const [bx, by] = mmToPx(b[0], b[1]);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  vertices.forEach(([mx, my], i) => {
+    const [px, py] = mmToPx(mx, my);
+    ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    const isSelected = editTarget === "outline" && selected?.type === "vertex" && selected.index === i;
+    ctx.fillStyle = isSelected ? "#ffd45a" : (i < 2 ? "#ffb84d" : "#4f9dff");
+    ctx.fill();
+  });
 }
 
-// Called by stl_viewer.js (a separate module) once the user clicks "Unroll
-// Selection" — hands off the unrolled 2D outline exactly the way
-// importDxf()'s success path does, so it goes through the identical
-// pick-edge flow (same reasoning as DXF: the unroll endpoint doesn't
-// normalize winding or choose a cable edge, that stays client-side).
-window.__stlHandoff = function(unrolledOutline) {
-    drawMode = "pick-edge";
-    pendingImportLoop = unrolledOutline;
-    hoveredEdgeIdx = -1;
-    outline = [];
-    fillRegion = [];
-    previewPanel.classList.add("hidden");
-    lastResult = null;
-    canvas.style.cursor = "crosshair";
+function drawFillPolygon() {
+  if (!fillVertices.length) return;
+  ctx.save();
+  ctx.beginPath();
+  fillVertices.forEach(([mx, my], i) => {
+    const [px, py] = mmToPx(mx, my);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  if (fillVertices.length >= 3) ctx.closePath();
+  ctx.fillStyle = "rgba(45,125,70,0.18)";
+  ctx.strokeStyle = "#2d7d46";
+  ctx.setLineDash([4, 3]);
+  ctx.lineWidth = 1.5;
+  if (fillVertices.length >= 3) ctx.fill();
+  ctx.stroke();
+  ctx.restore();
 
-    setStatus("STL patch unrolled — click the edge where the cable should exit");
-
-    fitView();
-    render();
-};
-
-// Index of the pendingImportLoop edge nearest a canvas point, or -1 if too far.
-function findNearestLoopEdge(cx, cy, maxDistPx = 15) {
-    let best = -1, bestDist = maxDistPx;
-    const n = pendingImportLoop.length;
-    for (let i = 0; i < n; i++) {
-        const [ax, ay] = mmToCanvas(pendingImportLoop[i][0], pendingImportLoop[i][1]);
-        const [bx, by] = mmToCanvas(pendingImportLoop[(i + 1) % n][0], pendingImportLoop[(i + 1) % n][1]);
-        const dist = pointToSegmentDist(cx, cy, ax, ay, bx, by);
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = i;
-        }
-    }
-    return best;
+  fillVertices.forEach(([mx, my], i) => {
+    const [px, py] = mmToPx(mx, my);
+    ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    const isSelected = editTarget === "fill" && selected?.type === "vertex" && selected.index === i;
+    ctx.fillStyle = isSelected ? "#ffd45a" : "#59c98a";
+    ctx.fill();
+  });
 }
 
-function pointToSegmentDist(px, py, ax, ay, bx, by) {
-    const dx = bx - ax, dy = by - ay;
-    const lenSq = dx * dx + dy * dy;
-    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
-    t = Math.max(0, Math.min(1, t));
-    const cx = ax + t * dx, cy = ay + t * dy;
-    return Math.hypot(px - cx, py - cy);
-}
+function redraw() {
+  drawGrid();
+  drawOutlinePolygon();
+  drawFillPolygon();
 
-function confirmEdgePick() {
-    if (hoveredEdgeIdx < 0 || pendingImportLoop.length < 3) return;
-    const n = pendingImportLoop.length;
+  const verts = activeArray();
+  if (verts.length) {
+    drawDimensions(verts);
+    if (validEdgeIndex(angleReferenceEdge)) drawReferenceEdge(angleReferenceEdge);
+    if (selected?.type === "edge") drawSelectedEdge(selected.index);
+    if (selected?.type === "outline") drawOutlineSelection();
+  }
 
-    // finalizeOutline() runs ensureCCW(), which only guarantees vertex 0 stays
-    // put — if the array needs reversing (because it's wound clockwise),
-    // vertex 1 gets replaced by the *old last* vertex, not necessarily the
-    // picked edge's other endpoint. So the walk direction here must match
-    // pendingImportLoop's own winding: forward if it's already CCW (ensureCCW
-    // will no-op), or the reverse traversal starting from the edge's second
-    // vertex if it's CW (so the array is already CCW by the time it gets
-    // there, and ensureCCW again no-ops) — either way the picked edge ends up
-    // intact at outline[0]/outline[1].
-    const isCCW = signedArea(pendingImportLoop) >= 0;
-    outline = [];
-    for (let i = 0; i < n; i++) {
-        const idx = isCCW
-            ? (hoveredEdgeIdx + i) % n
-            : (hoveredEdgeIdx + 1 - i + n) % n;
-        outline.push(pendingImportLoop[idx]);
-    }
+  if (previewPoint && verts.length && ["line", "hline", "vline"].includes(mode)) {
+    const last = verts[verts.length - 1];
+    const [ax, ay] = mmToPx(...last);
+    const [bx, by] = mmToPx(...previewPoint);
+    ctx.save();
+    ctx.strokeStyle = "#ffd45a";
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.restore();
+  }
 
-    pendingImportLoop = [];
-    hoveredEdgeIdx = -1;
-    drawMode = null;
-    canvas.style.cursor = "default";
-    finalizeOutline();
-}
+  if (arcState) {
+    drawArcPreview();
+  }
 
-function onCanvasClick(e) {
-    if (drawMode === "pick-edge") {
-        confirmEdgePick();
-        return;
-    }
-    if (drawMode !== "outline" && drawMode !== "fill") return;
-    const target = drawMode === "outline" ? outline : fillRegion;
-
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    const [mx, my] = canvasToMm(cx, cy);
-
-    // Snap to grid (1mm)
-    const sx = Math.round(mx);
-    const sy = Math.round(my);
-
-    // Close polygon if clicking near first vertex
-    if (target.length >= 3) {
-        const [fx, fy] = mmToCanvas(target[0][0], target[0][1]);
-        if (Math.hypot(cx - fx, cy - fy) < 15) {
-            if (drawMode === "outline") finishDrawing();
-            else finishDrawingFill();
-            return;
-        }
-    }
-
-    target.push([sx, sy]);
-    render();
-}
-
-function onCanvasDblClick(e) {
-    if (drawMode !== "outline" && drawMode !== "fill") return;
-    const target = drawMode === "outline" ? outline : fillRegion;
-    if (target.length >= 3) {
-        // Remove the extra vertex added by the click event
-        // (dblclick fires two click events first)
-        if (target.length > 3) {
-            target.pop();
-        }
-        if (drawMode === "outline") finishDrawing();
-        else finishDrawingFill();
-    }
-}
-
-function finishDrawing() {
-    drawMode = null;
-    btnDraw.textContent = "Draw Outline";
-    btnDraw.classList.remove("active");
-    canvas.style.cursor = "default";
-    finalizeOutline();
-}
-
-// Shared tail for any path that produces a raw outline polygon (freehand
-// drawing or DXF import + edge pick): normalize winding, rotate so the
-// cable edge (vertices 0->1) is horizontal at the bottom, reset dependent
-// state, and refresh the view.
-function finalizeOutline() {
-    outline = ensureCCW(outline);
-    outline = rotateForCable(outline);
-    // Outline changed shape/orientation — any prior fill region no longer applies
-    fillRegion = [];
-    fitView();
-    render();
-}
-
-function finishDrawingFill() {
-    drawMode = null;
-    btnDrawFill.textContent = "Draw Sensor Fill";
-    btnDrawFill.classList.remove("active");
-    canvas.style.cursor = "default";
-    fillRegion = ensureCCW(fillRegion);
-    render();
-}
-
-function onCanvasMove(e) {
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    const [mx, my] = canvasToMm(cx, cy);
-    coordDisplay.textContent = `${mx.toFixed(1)}, ${my.toFixed(1)} mm`;
-
-    if (draggingIdx >= 0) {
-        const target = draggingWhich === "outline" ? outline : fillRegion;
-        target[draggingIdx] = [Math.round(mx), Math.round(my)];
-        render();
-    } else if (drawMode === "pick-edge") {
-        const nearest = findNearestLoopEdge(cx, cy);
-        if (nearest !== hoveredEdgeIdx) {
-            hoveredEdgeIdx = nearest;
-            render();
-        }
-    }
-}
-
-function onCanvasDown(e) {
-    if (drawMode !== null) return;
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-
-    for (let i = 0; i < fillRegion.length; i++) {
-        const [vx, vy] = mmToCanvas(fillRegion[i][0], fillRegion[i][1]);
-        if (Math.hypot(cx - vx, cy - vy) < 10) {
-            draggingWhich = "fill";
-            draggingIdx = i;
-            canvas.style.cursor = "grabbing";
-            e.preventDefault();
-            return;
-        }
-    }
-
-    for (let i = 0; i < outline.length; i++) {
-        const [vx, vy] = mmToCanvas(outline[i][0], outline[i][1]);
-        if (Math.hypot(cx - vx, cy - vy) < 10) {
-            draggingWhich = "outline";
-            draggingIdx = i;
-            canvas.style.cursor = "grabbing";
-            e.preventDefault();
-            return;
-        }
-    }
-}
-
-function onCanvasUp() {
-    if (draggingIdx >= 0) {
-        draggingIdx = -1;
-        draggingWhich = null;
-        canvas.style.cursor = "default";
-    }
-}
-
-// ============================================================
-// Presets
-// ============================================================
-function loadPreset() {
-    const name = presetSelect.value;
-    if (!name || !PRESETS[name]) return;
-
-    const preset = PRESETS[name];
-    outline = preset.outline.map(p => [...p]);
-    fillRegion = [];
-    pendingImportLoop = [];
-    hoveredEdgeIdx = -1;
-
-    // Set default params first
-    setParam("pixel_w_mm", 4.0);
-    setParam("pixel_h_mm", 4.0);
-    setParam("pitch_x_mm", 4.2);
-    setParam("pitch_y_mm", 4.2);
-    setParam("trace_w_mm", 0.2);
-    setParam("gap_mm", 0.2);
-    setParam("clearance_mm", 0.2);
-    setParam("center_clear_mm", 0.2);
-    setParam("edge_clear_mm", 0.1);
-    setParam("edge_keepout_mm", 0.5);
-    setParam("board_edge_clear_mm", 0.4);
-    setParam("cable_length_mm", 4.0);
-    setParam("via_drill_mm", 0.15);
-    setParam("via_dia_mm", 0.35);
-    setParam("pad_pitch_mm", 0.5);
-
-    // Override with preset params
-    for (const [key, val] of Object.entries(preset.params)) {
-        setParam(key, val);
-    }
-
-    drawMode = null;
-    btnDraw.textContent = "Draw Outline";
-    btnDraw.classList.remove("active");
-    btnDrawFill.textContent = "Draw Sensor Fill";
-    btnDrawFill.classList.remove("active");
-    previewPanel.classList.add("hidden");
-    lastResult = null;
-
-    // Resize canvas first (preview panel was just hidden, giving more space)
-    requestAnimationFrame(resizeCanvas);
-    renderPixelPreview();
-}
-
-function setParam(id, val) {
-    const el = document.getElementById(id);
-    if (el) el.value = val;
-}
-
-function getParam(id) {
-    const el = document.getElementById(id);
-    return el ? parseFloat(el.value) : 0;
-}
-
-// Auto-link pixel size → pitch (maintain gap when pixel size changes)
-// Snapshot the gap when user focuses the input, then apply it on each change.
-(function() {
-    let gapX = 0.2, gapY = 0.2;
-    const wEl = document.getElementById("pixel_w_mm");
-    const hEl = document.getElementById("pixel_h_mm");
-    wEl.addEventListener("focus", () => { gapX = Math.max(getParam("pitch_x_mm") - getParam("pixel_w_mm"), 0.1); });
-    wEl.addEventListener("input", () => { setParam("pitch_x_mm", +(getParam("pixel_w_mm") + gapX).toFixed(2)); });
-    hEl.addEventListener("focus", () => { gapY = Math.max(getParam("pitch_y_mm") - getParam("pixel_h_mm"), 0.1); });
-    hEl.addEventListener("input", () => { setParam("pitch_y_mm", +(getParam("pixel_h_mm") + gapY).toFixed(2));
+  if (dragState?.type === "rect-preview") {
+    const a = dragState.start;
+    const b = dragState.current;
+    const rect = rectVertices(a, b);
+    ctx.save();
+    ctx.strokeStyle = "#ffd45a";
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    rect.forEach((p, i) => {
+      const [x, y] = mmToPx(...p);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
-})();
-
-function clearOutline() {
-    outline = [];
-    fillRegion = [];
-    pendingImportLoop = [];
-    hoveredEdgeIdx = -1;
-    drawMode = null;
-    btnDraw.textContent = "Draw Outline";
-    btnDraw.classList.remove("active");
-    btnDrawFill.textContent = "Draw Sensor Fill";
-    btnDrawFill.classList.remove("active");
-    canvas.style.cursor = "default";
-    previewPanel.classList.add("hidden");
-    lastResult = null;
-    presetSelect.value = "";
-    // Resize canvas first (preview panel was just hidden, giving more space)
-    requestAnimationFrame(resizeCanvas);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
-// ============================================================
-// UI state
-// ============================================================
-function updateUI() {
-    vertexCount.textContent = drawMode === "pick-edge"
-        ? `${pendingImportLoop.length} imported vertices — pick cable edge`
-        : fillRegion.length > 0
-            ? `${outline.length} outline / ${fillRegion.length} fill vertices`
-            : `${outline.length} vertices`;
-    btnGenerate.disabled = outline.length < 3 || drawMode !== null;
-    btnDraw.disabled = drawMode === "fill" || drawMode === "pick-edge";
-    btnImportDxf.disabled = drawMode !== null;
-    btnDrawFill.disabled = outline.length < 3 || drawMode === "outline" || drawMode === "pick-edge";
-    btnDownload.classList.toggle("hidden", !lastResult);
+function drawReferenceEdge(i) {
+  if (!validEdgeIndex(i)) return;
+  const [a, b] = edgeAt(i);
+  const [ax, ay] = mmToPx(...a);
+  const [bx, by] = mmToPx(...b);
+  ctx.save();
+  ctx.strokeStyle = "#46e6a7";
+  ctx.lineWidth = 4;
+  ctx.setLineDash([8, 5]);
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  ctx.restore();
 }
 
-function setStatus(msg, loading = false) {
-    if (loading) {
-        statusText.innerHTML = `<span class="spinner"></span>${msg}`;
+function drawSelectedEdge(i) {
+  if (activeArray().length < 2) return;
+  const [a, b] = edgeAt(i);
+  const [ax, ay] = mmToPx(...a);
+  const [bx, by] = mmToPx(...b);
+  ctx.save();
+  ctx.strokeStyle = "#ffd45a";
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  ctx.restore();
+}
+
+function drawArcPreview() {
+  const current = arcState.current || arcState.start || arcState.center;
+  const [cx, cy] = mmToPx(...arcState.center);
+  const [px, py] = mmToPx(...current);
+  ctx.save();
+  ctx.strokeStyle = "#ffd45a";
+  ctx.fillStyle = "#ffd45a";
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(px, py);
+  ctx.stroke();
+  if (arcState.step === "sweep" && arcState.start && current) {
+    const points = sampleArcPoints(arcState.center, arcState.start, current);
+    if (points.length) {
+      ctx.beginPath();
+      points.forEach((point, i) => {
+        const [x, y] = mmToPx(...point);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawOutlineSelection() {
+  const b = polygonBounds();
+  if (!b) return;
+  const [x1, y1] = mmToPx(b.minx, b.maxy);
+  const [x2, y2] = mmToPx(b.maxx, b.miny);
+  ctx.save();
+  ctx.strokeStyle = "#ffd45a";
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  ctx.restore();
+}
+
+function drawDimensions(verts) {
+  if (verts.length < 2 || view.scale < 1.2) return;
+  const edgeCount = verts.length >= 3 ? verts.length : verts.length - 1;
+  ctx.save();
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < edgeCount; i++) {
+    const [a, b] = edgeAt(i);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 2) continue;
+    const mx = (a[0] + b[0]) / 2;
+    const my = (a[1] + b[1]) / 2;
+    const [px, py] = mmToPx(mx, my);
+    const text = `${len.toFixed(1)} mm`;
+    const w = ctx.measureText(text).width + 8;
+    ctx.fillStyle = "rgba(12,17,22,0.78)";
+    ctx.fillRect(px - w / 2, py - 8, w, 16);
+    ctx.fillStyle = "#dce8f5";
+    ctx.fillText(text, px, py);
+  }
+  ctx.restore();
+}
+
+function setOutlineInfo(extra) {
+  const verts = activeArray();
+  const label = editTarget === "fill" ? "sensorize-zone" : "outline";
+  outlineInfo.textContent =
+    `${verts.length} ${label} vertices` +
+    (editTarget === "outline" && verts.length >= 2 ? " · cable edge = orange" : "") +
+    (extra ? ` · ${extra}` : "");
+}
+
+function setMode(nextMode) {
+  mode = nextMode;
+  selected = null;
+  previewPoint = null;
+  arcState = null;
+  Object.entries(cadButtons).forEach(([name, button]) => button.classList.toggle("active", name === mode));
+  canvas.style.cursor = mode === "select" ? "default" : "crosshair";
+  syncDimensionFields();
+  updateCadButtons();
+  redraw();
+}
+
+function updateFillToggleAvailability() {
+  if (!cadTargetFillBtn) return;
+  const available = vertices.length >= 3;
+  cadTargetFillBtn.disabled = !available;
+  cadTargetFillBtn.title = available ? "" : "Draw a board outline first";
+  if (!available && editTarget === "fill") setEditTarget("outline");
+}
+
+function updateTargetButtons() {
+  cadTargetOutlineBtn?.classList.toggle("active", editTarget === "outline");
+  cadTargetFillBtn?.classList.toggle("active", editTarget === "fill");
+  if (fillZoneHint) fillZoneHint.hidden = editTarget !== "fill";
+  if (clearOutlineBtn) clearOutlineBtn.textContent = editTarget === "fill" ? "Clear sensorize zone" : "Clear outline";
+}
+
+function setEditTarget(target) {
+  if (target === editTarget) return;
+  if (target === "fill" && vertices.length < 3) return;
+  editTarget = target;
+  selected = null;
+  previewPoint = null;
+  arcState = null;
+  angleReferenceEdge = null;
+  updateTargetButtons();
+  syncDimensionFields();
+  updateCadButtons();
+  redraw();
+  setOutlineInfo();
+}
+
+function updateCadButtons() {
+  cadUndoBtn.disabled = undoStack.length === 0;
+  cadRedoBtn.disabled = redoStack.length === 0;
+  cadDeleteBtn.disabled = !selected;
+  cadSetCableBtn.disabled = editTarget !== "outline" || selected?.type !== "edge";
+  cadSetAngleRefBtn.disabled = selected?.type !== "edge";
+  if (!validEdgeIndex(angleReferenceEdge)) angleReferenceEdge = null;
+  updateFillToggleAvailability();
+}
+
+function syncDimensionFields() {
+  const b = polygonBounds();
+  cadWidthInput.value = b ? (b.maxx - b.minx).toFixed(2) : "";
+  cadHeightInput.value = b ? (b.maxy - b.miny).toFixed(2) : "";
+  if (selected?.type === "edge") {
+    cadLengthInput.value = edgeLength(selected.index).toFixed(2);
+    const relative = angleReferenceEdge !== null && selected.index !== angleReferenceEdge
+      ? relativeEdgeAngle(angleReferenceEdge, selected.index)
+      : null;
+    cadAngleInput.value = (relative ?? edgeAngle(selected.index)).toFixed(1);
+  } else {
+    cadLengthInput.value = "";
+  }
+}
+
+function rectVertices(a, b) {
+  return [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]];
+}
+
+function addLinePoint(p, event) {
+  if (editTarget === "outline" && foldLines.length) foldLines = [];
+  angleReferenceEdge = null;
+  const verts = activeArray();
+  if (!verts.length) {
+    pushUndo();
+    setActiveArray([p]);
+  } else {
+    const next = constrainPoint(verts[verts.length - 1], p, event);
+    const closeTol = 8 / view.scale;
+    if (verts.length >= 3 && Math.hypot(next[0] - verts[0][0], next[1] - verts[0][1]) <= closeTol) {
+      setMode("select");
     } else {
-        statusText.textContent = msg;
+      pushUndo();
+      setActiveArray(verts.concat([next]));
     }
+  }
+  redraw();
+  setOutlineInfo();
+  syncDimensionFields();
 }
 
-// ============================================================
-// Server wake-up (Render free tier spins down after 15min idle)
-// ============================================================
-// fetch() has no built-in timeout — an in-flight request to a Render
-// instance that's mid-redeploy (connection held open, never responds) can
-// hang indefinitely. Bound each attempt so a stuck request can't block the
-// wake-up loop past its intended wait budget.
-async function fetchWithTimeout(url, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, { signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.button === 1 || event.button === 2 || spacePanActive) {
+    startPan(event);
+    return;
+  }
+  const p = eventMm(event);
+  if (mode === "arc") {
+    if (!arcState) {
+      arcState = { step: "radius", center: p, start: null, current: p };
+      setOutlineInfo("arc center set");
+    } else if (arcState.step === "radius") {
+      arcState = { ...arcState, step: "sweep", start: p, current: p };
+      setOutlineInfo("arc radius set");
+    } else if (arcState.step === "sweep") {
+      const points = sampleArcPoints(arcState.center, arcState.start, p);
+      if (points.length) {
+        pushUndo();
+        appendArcPoints(points);
+        selected = { type: "vertex", index: activeArray().length - 1 };
+        angleReferenceEdge = null;
+      }
+      arcState = null;
+      previewPoint = null;
+      redraw();
+      setOutlineInfo();
+      syncDimensionFields();
+      updateCadButtons();
     }
-}
+    redraw();
+    return;
+  }
+  if (mode === "rect") {
+    pushUndo();
+    dragState = { type: "rect-preview", start: p, current: p };
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+  if (["line", "hline", "vline"].includes(mode)) {
+    addLinePoint(p, event);
+    return;
+  }
 
-async function ensureServerAwake() {
-    // Quick probe: if the server's already warm this resolves in well under
-    // a second, so a short timeout here is fine — it only needs to fail
-    // fast, not succeed slowly.
-    try {
-        const resp = await fetchWithTimeout(`${API_URL}/health`, 6000);
-        if (resp.ok) return;
-    } catch (e) {}
-
-    // Server is cold (Render free tier spins down after 15min idle). A real
-    // cold-boot response can take 15-40+s to actually arrive — NOT hang
-    // forever, just be slow — so each retry attempt below uses a generous
-    // per-attempt timeout. (An earlier version used a 10s timeout here,
-    // which was short enough to abort almost every attempt right before it
-    // would have succeeded, guaranteeing the full wait budget was used on
-    // every cold start even though the server was actually coming up
-    // fine — the real request right after, with no artificial timeout,
-    // would then succeed immediately.)
-    const startedAt = Date.now();
-    const maxWaitMs = 180000;  // 3 minutes
-    while (Date.now() - startedAt < maxWaitMs) {
-        const elapsedS = Math.round((Date.now() - startedAt) / 1000);
-        setStatus(`Server is waking up (this can take a minute or two on a cold start) — ${elapsedS}s...`, true);
-        try {
-            const h = await fetchWithTimeout(`${API_URL}/health`, 35000);
-            if (h.ok) return;
-        } catch (e2) {}
-        await new Promise(r => setTimeout(r, 1000));
-    }
-    setStatus("Server is taking longer than expected to wake up — continuing anyway...", true);
-}
-
-// ============================================================
-// Generate
-// ============================================================
-async function generate() {
-    if (outline.length < 3) return;
-
-    const body = {
-        outline: outline,
-        fill_region: fillRegion.length >= 3 ? fillRegion : null,
-        pixel_w_mm: getParam("pixel_w_mm"),
-        pixel_h_mm: getParam("pixel_h_mm"),
-        pitch_x_mm: getParam("pitch_x_mm"),
-        pitch_y_mm: getParam("pitch_y_mm"),
-        edge_keepout_mm: getParam("edge_keepout_mm"),
-        trace_w_mm: getParam("trace_w_mm"),
-        gap_mm: getParam("gap_mm"),
-        clearance_mm: getParam("clearance_mm"),
-        center_clear_mm: getParam("center_clear_mm"),
-        edge_clear_mm: getParam("edge_clear_mm"),
-        via_drill_mm: getParam("via_drill_mm"),
-        via_dia_mm: getParam("via_dia_mm"),
-        pad_pitch_mm: getParam("pad_pitch_mm"),
-        cable_length_mm: getParam("cable_length_mm"),
-        board_edge_clear_mm: getParam("board_edge_clear_mm"),
-    };
-
-    btnGenerate.disabled = true;
-    setStatus("Generating PCB...", true);
-    previewPanel.classList.add("hidden");
-    lastResult = null;
-
-    await ensureServerAwake();
-    setStatus("Generating PCB...", true);
-
-    try {
-        const resp = await fetch(`${API_URL}/generate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        });
-
-        if (!resp.ok) {
-            const err = await resp.json();
-            throw new Error(err.detail || `HTTP ${resp.status}`);
-        }
-
-        const data = await resp.json();
-        lastResult = data.zip_b64;
-
-        // Show preview
-        svgContainer.innerHTML = data.svg;
-        previewPanel.classList.remove("hidden");
-        // Resize canvas to fit the reduced space
-        requestAnimationFrame(resizeCanvas);
-
-        // Stats
-        const s = data.stats;
-        statsGrid.innerHTML = `
-            <dt>Active Pixels</dt><dd>${s.active_pixels}</dd>
-            <dt>Removed</dt><dd>${s.removed_pixels}</dd>
-            <dt>Col Routes</dt><dd>${s.col_routes}</dd>
-            <dt>Row Routes</dt><dd>${s.row_routes}</dd>
-            <dt>Connector</dt><dd>${s.connector_pos}-pos</dd>
-            <dt>Total Pixels</dt><dd>${s.total_pixels}</dd>
-        `;
-
-        // DRC
-        const d = data.drc;
-        if (d.violations === 0) {
-            drcStatus.className = "drc-status drc-pass";
-            drcStatus.textContent = "DRC: PASS (0 violations)";
-        } else {
-            drcStatus.className = "drc-status drc-fail";
-            drcStatus.textContent = `DRC: FAIL (${d.violations} violations)`;
-        }
-
-        setStatus(`Done! ${s.active_pixels} pixels, ${s.col_routes + s.row_routes} routes`);
-    } catch (err) {
-        setStatus(`Error: ${err.message}`);
-        console.error(err);
-    }
-
-    btnGenerate.disabled = outline.length < 3;
-    updateUI();
-}
-
-// ============================================================
-// Download
-// ============================================================
-function downloadZip() {
-    if (!lastResult) return;
-    const bytes = atob(lastResult);
-    const arr = new Uint8Array(bytes.length);
-    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-
-    const blob = new Blob([arr], { type: "application/zip" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "tactile_pcb.zip";
-    a.click();
-    URL.revokeObjectURL(url);
-}
-
-// ============================================================
-// Pixel Preview
-// ============================================================
-function renderPixelPreview() {
-    const container = document.getElementById("pixel-preview");
-    const w = getParam("pixel_w_mm");
-    const h = getParam("pixel_h_mm");
-    const tw = getParam("trace_w_mm");
-    const gp = getParam("gap_mm");
-    const cc = getParam("center_clear_mm");
-    const ec = getParam("edge_clear_mm");
-    const vDrill = getParam("via_drill_mm");
-    const vDia = getParam("via_dia_mm");
-
-    // Boundaries
-    const x1 = -w / 2, y1 = -h / 2, x2 = w / 2, y2 = h / 2;
-    const ix1 = x1 + ec, iy1 = y1 + ec;
-    const ix2 = x2 - ec, iy2 = y2 - ec;
-    const innerW = ix2 - ix1;
-    const innerH = iy2 - iy1;
-
-    if (innerW <= tw || innerH <= tw) {
-        container.innerHTML = '<div class="pixel-info">Invalid: edge clearance too large</div>';
-        return;
-    }
-
-    const xL = ix1 + tw / 2;
-    const xR = ix2 - tw / 2;
-    const ymid = (iy1 + iy2) / 2;
-    const pitch = tw + gp;
-    const totalSlots = Math.max(1, Math.floor((innerH + gp) / pitch));
-    const span = totalSlots * tw + (totalSlots - 1) * gp;
-    const y0 = (iy1 + iy2 - span) / 2 + tw / 2;
-    const spineYlo = iy1 + tw / 2;
-    const spineYhi = iy2 - tw / 2;
-    const xEndLeftMax = xR - (cc + tw);
-    const xEndRightMin = xL + (cc + tw);
-    const viaX = ix1 + vDia / 2;
-    const viaY = ymid;
-
-    // SVG setup — Y-flip: SVG y = svgTop + (y2 + labelSpace) - worldY
-    const pad = Math.max(w, h) * 0.12;
-    const labelSpace = 0.5;
-    const svgX1 = x1 - pad;
-    const svgY1 = 0;
-    const svgW = w + 2 * pad;
-    const svgH = h + 2 * pad + labelSpace;
-    const fy = (v) => (pad + labelSpace) + (y2 - v);  // flip: world y2 → pad+labelSpace, world y1 → pad+labelSpace+h
-
-    const col1 = "#2673d9";  // blue (pad 1)
-    const col2 = "#d94026";  // red (pad 2)
-    const strokeW = tw;
-
-    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${svgX1.toFixed(3)} 0 ${svgW.toFixed(3)} ${svgH.toFixed(3)}">`;
-
-    // Outer boundary
-    svg += `<rect x="${x1}" y="${fy(y2)}" width="${w}" height="${h}" fill="none" stroke="#666" stroke-width="0.06"/>`;
-
-    // Inner boundary
-    svg += `<rect x="${ix1}" y="${fy(iy2)}" width="${innerW}" height="${innerH}" fill="none" stroke="#aaa" stroke-width="0.03" stroke-dasharray="0.1"/>`;
-
-    // Left spine (pad 1)
-    svg += `<line x1="${xL}" y1="${fy(spineYlo)}" x2="${xL}" y2="${fy(spineYhi)}" stroke="${col1}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
-
-    // Right spine (pad 2)
-    svg += `<line x1="${xR}" y1="${fy(spineYlo)}" x2="${xR}" y2="${fy(spineYhi)}" stroke="${col2}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
-
-    // Fingers
-    for (let i = 0; i < totalSlots; i++) {
-        const yy = y0 + i * pitch;
-        if (i % 2 === 0) {
-            svg += `<line x1="${xL}" y1="${fy(yy)}" x2="${xEndLeftMax}" y2="${fy(yy)}" stroke="${col1}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
-        } else {
-            svg += `<line x1="${xR}" y1="${fy(yy)}" x2="${xEndRightMin}" y2="${fy(yy)}" stroke="${col2}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
-        }
-    }
-
-    // Via annular ring
-    svg += `<circle cx="${viaX}" cy="${fy(viaY)}" r="${vDia / 2}" fill="${col1}" fill-opacity="0.3" stroke="${col1}" stroke-width="0.02"/>`;
-    // Drill hole
-    svg += `<circle cx="${viaX}" cy="${fy(viaY)}" r="${vDrill / 2}" fill="white" stroke="#555" stroke-width="0.02"/>`;
-
-    // Labels
-    const labelY = fy(y2) - 0.15;
-    svg += `<text x="${xL}" y="${labelY}" text-anchor="middle" font-size="0.35" fill="${col1}" font-weight="bold">Pad 1</text>`;
-    svg += `<text x="${xR}" y="${labelY}" text-anchor="middle" font-size="0.35" fill="${col2}" font-weight="bold">Pad 2</text>`;
-
-    svg += '</svg>';
-    svg += `<div class="pixel-info">${w.toFixed(1)} x ${h.toFixed(1)} mm | ${totalSlots} fingers | t=${tw} g=${gp}</div>`;
-
-    container.innerHTML = svg;
-}
-
-// Attach live update to all parameter inputs
-document.querySelectorAll('.panel input[type="number"]').forEach(input => {
-    input.addEventListener("input", renderPixelPreview);
+  const hit = hitTest(p);
+  selected = hit;
+  syncDimensionFields();
+  updateCadButtons();
+  redraw();
+  if (!hit) return;
+  pushUndo();
+  dragState = {
+    type: hit.type,
+    index: hit.index,
+    start: p,
+    original: cloneVertices(activeArray()),
+  };
+  canvas.setPointerCapture(event.pointerId);
 });
 
-// ============================================================
-// Start
-// ============================================================
-init();
+canvas.addEventListener("pointermove", (event) => {
+  if (panState && event.pointerId === panState.pointerId) {
+    updatePan(event);
+    return;
+  }
+  const raw = eventMm(event);
+  if (dragState?.type === "rect-preview") {
+    dragState.current = raw;
+    redraw();
+    return;
+  }
+  if (!dragState && mode === "arc" && arcState) {
+    arcState.current = raw;
+    redraw();
+    return;
+  }
+  if (!dragState && ["line", "hline", "vline"].includes(mode) && activeArray().length) {
+    previewPoint = constrainPoint(activeArray()[activeArray().length - 1], raw, event);
+    redraw();
+    return;
+  }
+  if (!dragState) return;
+
+  const dx = raw[0] - dragState.start[0];
+  const dy = raw[1] - dragState.start[1];
+  if (dragState.type === "vertex") {
+    const verts = activeArray().slice();
+    verts[dragState.index] = snapPoint([
+      dragState.original[dragState.index][0] + dx,
+      dragState.original[dragState.index][1] + dy,
+    ]);
+    setActiveArray(verts);
+  } else if (dragState.type === "outline") {
+    setActiveArray(dragState.original.map((p) => snapPoint([p[0] + dx, p[1] + dy])));
+  }
+  redraw();
+  syncDimensionFields();
+});
+
+canvas.addEventListener("pointerup", (event) => {
+  if (stopPan(event)) return;
+  if (!dragState) return;
+  if (dragState.type === "rect-preview") {
+    setActiveArray(rectVertices(dragState.start, snapPoint(dragState.current)));
+    if (editTarget === "outline") foldLines = [];
+    angleReferenceEdge = null;
+    fitViewTo(activeArray());
+    setMode("select");
+  }
+  dragState = null;
+  canvas.releasePointerCapture(event.pointerId);
+  redraw();
+  setOutlineInfo();
+  syncDimensionFields();
+  updateCadButtons();
+});
+
+canvas.addEventListener("pointercancel", (event) => {
+  stopPan(event);
+});
+
+canvas.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
+
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const [px, py] = eventCanvasPx(event);
+  const factor = Math.exp(-event.deltaY * 0.0015);
+  zoomView(factor, [px, py]);
+}, { passive: false });
+
+document.addEventListener("keydown", (event) => {
+  if (isTypingTarget(event.target)) return;
+  if (event.code === "Space" && !event.repeat) {
+    spacePanActive = true;
+    canvas.classList.add("space-pan");
+    event.preventDefault();
+    return;
+  }
+  if (event.key !== "Escape" || !arcState) return;
+  arcState = null;
+  previewPoint = null;
+  redraw();
+  setOutlineInfo("arc cancelled");
+});
+
+document.addEventListener("keyup", (event) => {
+  if (event.code !== "Space") return;
+  spacePanActive = false;
+  canvas.classList.remove("space-pan");
+});
+
+window.addEventListener("blur", () => {
+  spacePanActive = false;
+  panState = null;
+  canvas.classList.remove("space-pan", "is-panning");
+});
+
+Object.entries(cadButtons).forEach(([name, button]) => button.addEventListener("click", () => setMode(name)));
+
+cadUndoBtn.addEventListener("click", () => {
+  if (!undoStack.length) return;
+  redoStack.push({
+    vertices: cloneVertices(vertices),
+    fillVertices: cloneVertices(fillVertices),
+    foldLines: foldLines.map(([a, b]) => [a.slice(), b.slice()]),
+  });
+  restoreSnapshot(undoStack.pop());
+});
+cadRedoBtn.addEventListener("click", () => {
+  if (!redoStack.length) return;
+  undoStack.push({
+    vertices: cloneVertices(vertices),
+    fillVertices: cloneVertices(fillVertices),
+    foldLines: foldLines.map(([a, b]) => [a.slice(), b.slice()]),
+  });
+  restoreSnapshot(redoStack.pop());
+});
+cadDeleteBtn.addEventListener("click", () => {
+  if (!selected) return;
+  pushUndo();
+  let verts = activeArray();
+  if (selected.type === "vertex" && verts.length > 3) {
+    verts = verts.slice(); verts.splice(selected.index, 1);
+  } else if (selected.type === "edge" && verts.length > 3) {
+    verts = verts.slice(); verts.splice((selected.index + 1) % verts.length, 1);
+  } else if (selected.type === "outline") {
+    verts = [];
+    if (editTarget === "outline") foldLines = [];
+  }
+  setActiveArray(verts);
+  selected = null;
+  angleReferenceEdge = null;
+  redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
+});
+cadSetAngleRefBtn.addEventListener("click", () => {
+  if (selected?.type !== "edge") return;
+  angleReferenceEdge = selected.index;
+  redraw();
+  setOutlineInfo(`angle reference = edge ${angleReferenceEdge + 1}`);
+  syncDimensionFields();
+  updateCadButtons();
+});
+cadSetCableBtn.addEventListener("click", () => {
+  if (editTarget !== "outline" || selected?.type !== "edge") return;
+  pushUndo();
+  const i = selected.index;
+  vertices = vertices.slice(i).concat(vertices.slice(0, i));
+  selected = { type: "edge", index: 0 };
+  angleReferenceEdge = null;
+  hideCableEdgeBanner();
+  redraw(); setOutlineInfo("cable edge updated"); syncDimensionFields(); updateCadButtons();
+});
+cadZoomOutBtn.addEventListener("click", () => zoomView(0.82));
+cadZoomInBtn.addEventListener("click", () => zoomView(1.22));
+cadFitBtn.addEventListener("click", fitOutlineView);
+cadTargetOutlineBtn?.addEventListener("click", () => setEditTarget("outline"));
+cadTargetFillBtn?.addEventListener("click", () => setEditTarget("fill"));
+
+cadLengthInput.addEventListener("change", () => {
+  if (selected?.type !== "edge") return;
+  const len = parseFloat(cadLengthInput.value);
+  if (!Number.isFinite(len) || len <= 0) return;
+  pushUndo();
+  const verts = activeArray().slice();
+  const i = selected.index;
+  const a = verts[i];
+  const angle = Math.atan2(verts[(i + 1) % verts.length][1] - a[1], verts[(i + 1) % verts.length][0] - a[0]);
+  verts[(i + 1) % verts.length] = snapPoint([a[0] + len * Math.cos(angle), a[1] + len * Math.sin(angle)]);
+  setActiveArray(verts);
+  redraw(); setOutlineInfo(); syncDimensionFields();
+});
+cadAngleInput.addEventListener("change", () => {
+  if (selected?.type !== "edge") return;
+  const angleDeg = parseFloat(cadAngleInput.value);
+  if (!Number.isFinite(angleDeg)) return;
+  pushUndo();
+  const verts = activeArray().slice();
+  const i = selected.index;
+  const a = verts[i];
+  const len = edgeLength(i);
+  const targetAngleDeg = angleReferenceEdge !== null && angleReferenceEdge !== i && validEdgeIndex(angleReferenceEdge)
+    ? edgeAngle(angleReferenceEdge) + angleDeg
+    : angleDeg;
+  const angle = targetAngleDeg * Math.PI / 180;
+  verts[(i + 1) % verts.length] = snapPoint([a[0] + len * Math.cos(angle), a[1] + len * Math.sin(angle)]);
+  setActiveArray(verts);
+  const extra = angleReferenceEdge !== null && angleReferenceEdge !== i && validEdgeIndex(angleReferenceEdge)
+    ? `relative angle to edge ${angleReferenceEdge + 1}`
+    : undefined;
+  redraw(); setOutlineInfo(extra); syncDimensionFields();
+});
+function resizeBounds(axis, value) {
+  const b = polygonBounds();
+  if (!b || !Number.isFinite(value) || value <= 0) return;
+  pushUndo();
+  const cx = (b.minx + b.maxx) / 2;
+  const cy = (b.miny + b.maxy) / 2;
+  const sx = axis === "x" ? value / Math.max(1e-9, b.maxx - b.minx) : 1;
+  const sy = axis === "y" ? value / Math.max(1e-9, b.maxy - b.miny) : 1;
+  setActiveArray(activeArray().map(([x, y]) => snapPoint([cx + (x - cx) * sx, cy + (y - cy) * sy])));
+  redraw(); setOutlineInfo(); syncDimensionFields();
+}
+cadWidthInput.addEventListener("change", () => resizeBounds("x", parseFloat(cadWidthInput.value)));
+cadHeightInput.addEventListener("change", () => resizeBounds("y", parseFloat(cadHeightInput.value)));
+
+clearOutlineBtn.addEventListener("click", () => {
+  pushUndo();
+  if (editTarget === "outline") {
+    vertices = [];
+    fillVertices = [];
+    foldLines = [];
+  } else {
+    fillVertices = [];
+  }
+  selected = null;
+  angleReferenceEdge = null;
+  if (!vertices.length && !fillVertices.length) resetView();
+  redraw();
+  setOutlineInfo();
+  syncDimensionFields();
+  updateCadButtons();
+});
+document.getElementById("preset-square").addEventListener("click", () => {
+  if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
+  pushUndo();
+  setActiveArray([[-20, -20], [20, -20], [20, 20], [-20, 20]]);
+  if (editTarget === "outline") foldLines = [];
+  selected = null;
+  angleReferenceEdge = null;
+  fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
+});
+document.getElementById("preset-rect").addEventListener("click", () => {
+  if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
+  pushUndo();
+  setActiveArray([[-25, -15], [25, -15], [25, 15], [-25, 15]]);
+  if (editTarget === "outline") foldLines = [];
+  selected = null;
+  angleReferenceEdge = null;
+  fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
+});
+
+function confirmOverwrite(arrLength, itemLabel) {
+  if (!arrLength) return true;
+  return window.confirm(`This will replace your current ${itemLabel} — continue?`);
+}
+
+function showCableEdgeBanner() {
+  if (cableEdgeBanner) cableEdgeBanner.hidden = false;
+}
+function hideCableEdgeBanner() {
+  if (cableEdgeBanner) cableEdgeBanner.hidden = true;
+}
+cableEdgeBannerClose?.addEventListener("click", hideCableEdgeBanner);
+
+// Outline delivered from a selected STL face. Always targets the board
+// outline, regardless of which array was being edited beforehand.
+window.addEventListener("otc:face-outline", (e) => {
+  if (!confirmOverwrite(vertices.length, "board outline")) return;
+  pushUndo();
+  editTarget = "outline";
+  updateTargetButtons();
+  vertices = e.detail.outline.map((p) => [p[0], p[1]]);
+  foldLines = (e.detail.foldLines || []).map(([a, b]) => [a.slice(), b.slice()]);
+  selected = null;
+  angleReferenceEdge = null;
+  fitViewTo(vertices);
+  redraw();
+  const faceText = e.detail.faceCount > 1 ? `${e.detail.faceCount} unfolded faces` : "STL face";
+  setOutlineInfo(`from ${faceText} · ${e.detail.w.toFixed(1)} × ${e.detail.h.toFixed(1)} mm`);
+  syncDimensionFields();
+  updateCadButtons();
+  genStatus.textContent = "Unfolded net loaded as the PCB outline — press Generate PCB.";
+  showCableEdgeBanner();
+});
+window.addEventListener("otc:face-clear", () => {
+  pushUndo();
+  vertices = [];
+  fillVertices = [];
+  foldLines = [];
+  selected = null;
+  angleReferenceEdge = null;
+  resetView();
+  redraw();
+  setOutlineInfo();
+  syncDimensionFields();
+  updateCadButtons();
+});
+
+// Outline delivered from a DXF import (dxf-import.js). Always targets the
+// board outline, same convention as the STL handoff above.
+window.addEventListener("otc:dxf-outline", (e) => {
+  if (!confirmOverwrite(vertices.length, "board outline")) return;
+  pushUndo();
+  editTarget = "outline";
+  updateTargetButtons();
+  vertices = e.detail.outline.map((p) => [p[0], p[1]]);
+  foldLines = [];
+  selected = null;
+  angleReferenceEdge = null;
+  fitViewTo(vertices);
+  redraw();
+  setOutlineInfo("from DXF · confirm the cable edge below");
+  syncDimensionFields();
+  updateCadButtons();
+  genStatus.textContent = (e.detail.warnings && e.detail.warnings.length)
+    ? `DXF imported with warnings: ${e.detail.warnings.join(" ")}`
+    : "DXF outline loaded — press Generate PCB.";
+  showCableEdgeBanner();
+});
+
+// ---- generate ----
+const genStatus = document.getElementById("gen-status");
+const statsEl = document.getElementById("stats");
+const pcbPreview = document.getElementById("pcb-preview");
+const downloadBtn = document.getElementById("download");
+const routeEditStatus = document.getElementById("route-edit-status");
+const tailExtensionPrompt = document.getElementById("tail-extension-prompt");
+const tailExtensionPromptClose = document.getElementById("tail-extension-prompt-close");
+let lastZipB64 = null;
+let tailExtensionPromptDismissed = false;
+
+function downloadZip(zipB64, filename) {
+  if (!zipB64) return;
+  const bin = atob(zipB64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const routeEditor = createRouteEditor({
+  apiBase: API_BASE,
+  previewEl: pcbPreview,
+  statusEl: routeEditStatus,
+  downloadZip,
+  renderStats,
+  readParams,
+  onTailExtensionApplied: hideTailExtensionPrompt,
+});
+
+function showTailExtensionPrompt() {
+  if (tailExtensionPrompt && !tailExtensionPromptDismissed) {
+    if (tailExtensionPrompt.parentElement !== pcbPreview) {
+      pcbPreview.prepend(tailExtensionPrompt);
+    }
+    tailExtensionPrompt.hidden = false;
+  }
+}
+
+function hideTailExtensionPrompt() {
+  if (tailExtensionPrompt) tailExtensionPrompt.hidden = true;
+}
+
+tailExtensionPromptClose?.addEventListener("click", () => {
+  tailExtensionPromptDismissed = true;
+  hideTailExtensionPrompt();
+});
+
+const boardModeInputs = Array.from(document.querySelectorAll('input[name="board_mode"]'));
+function selectedBoardMode() {
+  const picked = boardModeInputs.find((el) => el.checked);
+  return picked ? picked.value : "expand";
+}
+
+// Sensor grid: either the taxel size is given and the count follows, or the
+// count is given and the backend solves the size (grow-board mode only — see
+// _apply_target_grid in backend/main.py).
+const gridModeInputs = Array.from(document.querySelectorAll('input[name="grid_mode"]'));
+const gridSizeInputIds = ["pixel_w_mm", "pixel_h_mm", "pitch_x_mm", "pitch_y_mm"];
+const gridSizeFieldsNote = document.getElementById("grid-size-note");
+const gridCountFields = document.getElementById("grid-count-fields");
+const gridCountHint = document.getElementById("grid-count-hint");
+const gridCountModeInput = gridModeInputs.find((el) => el.value === "count");
+const gridSizeModeInput = gridModeInputs.find((el) => el.value === "size");
+
+function selectedGridMode() {
+  const picked = gridModeInputs.find((el) => el.checked);
+  return picked ? picked.value : "size";
+}
+
+function syncGridMode() {
+  // Rows/cols has no meaning once the outline is fixed and the keep-out band is
+  // what decides the packable area, so fall back to size mode there.
+  const countAllowed = selectedBoardMode() === "expand";
+  if (gridCountModeInput) {
+    gridCountModeInput.disabled = !countAllowed;
+    if (!countAllowed && gridCountModeInput.checked && gridSizeModeInput) {
+      gridSizeModeInput.checked = true;
+    }
+  }
+  const countMode = selectedGridMode() === "count";
+  // The size fields stay visible in count mode rather than being swapped out:
+  // they are where the solved taxel size is reported back after Generate (see
+  // showSolvedGridSize), and they feed the pixel footprint preview. Read-only,
+  // since in this mode they are an output.
+  for (const id of gridSizeInputIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.readOnly = countMode;
+    el.classList.toggle("is-derived", countMode);
+  }
+  if (gridSizeFieldsNote) gridSizeFieldsNote.hidden = !countMode;
+  if (gridCountFields) gridCountFields.hidden = !countMode;
+  if (gridCountHint) gridCountHint.hidden = !countMode;
+}
+
+// Write the taxel size the backend solved back into the (read-only) size
+// fields, so the numbers and the footprint preview show what was actually
+// built rather than the stale values that were sent and ignored.
+function showSolvedGridSize(editData) {
+  if (selectedGridMode() !== "count") return;
+  const solved = editData?.params;
+  if (!solved) return;
+  for (const id of gridSizeInputIds) {
+    const el = document.getElementById(id);
+    if (el && Number.isFinite(solved[id])) el.value = String(Number(solved[id].toFixed(4)));
+  }
+  renderPixelPreview();
+}
+
+for (const el of [...gridModeInputs, ...boardModeInputs]) {
+  el.addEventListener("change", syncGridMode);
+}
+syncGridMode();
+// Everything below is expansion-only shaping: in fixed-outline mode the drawn
+// outline is the board, so these are forced off exactly as they were when
+// auto-expand was a checkbox the user could clear.
+// board_edge_clear_mm is deliberately NOT in here. It is a manufacturing
+// clearance between copper and the board cut, not board-growth padding, and
+// pipeline/drc.py only runs its copper-to-edge test when it is non-zero — so
+// forcing it to 0 in fixed-outline mode (as this used to) disabled that test in
+// exactly the mode where copper runs closest to the edge. Mirrors the same
+// reasoning in _without_expansion_padding (backend/main.py).
+const expansionDependentInputs = {
+  followMain: document.getElementById("follow_main_padding"),
+  followDistance: document.getElementById("follow_main_padding_mm"),
+  smoothFollow: document.getElementById("smooth_follow_padding"),
+};
+const expansionDefaults = {
+  followDistance: expansionDependentInputs.followDistance?.value || "2.0",
+  followMain: Boolean(expansionDependentInputs.followMain?.checked),
+  smoothFollow: Boolean(expansionDependentInputs.smoothFollow?.checked),
+};
+let savedExpansionValues = { ...expansionDefaults };
+
+function syncAutoExpandControls() {
+  if (!boardModeInputs.length) return;
+  const enabled = selectedBoardMode() === "expand";
+  const { followMain, followDistance, smoothFollow } = expansionDependentInputs;
+
+  if (!enabled) {
+    savedExpansionValues = {
+      followDistance: followDistance?.value || expansionDefaults.followDistance,
+      followMain: Boolean(followMain?.checked),
+      smoothFollow: Boolean(smoothFollow?.checked),
+    };
+    if (followMain) {
+      followMain.checked = false;
+      followMain.disabled = true;
+    }
+    if (followDistance) {
+      followDistance.value = "0";
+      followDistance.disabled = true;
+    }
+    if (smoothFollow) {
+      smoothFollow.checked = false;
+      smoothFollow.disabled = true;
+    }
+    return;
+  }
+
+  if (followMain) {
+    followMain.disabled = false;
+    followMain.checked = savedExpansionValues.followMain;
+  }
+  if (followDistance) {
+    followDistance.disabled = false;
+    followDistance.value = savedExpansionValues.followDistance || expansionDefaults.followDistance;
+  }
+  if (smoothFollow) {
+    smoothFollow.disabled = false;
+    smoothFollow.checked = savedExpansionValues.smoothFollow;
+  }
+}
+
+boardModeInputs.forEach((el) => el.addEventListener("change", syncAutoExpandControls));
+syncAutoExpandControls();
+
+function readParams() {
+  const ids = ["pixel_w_mm", "pixel_h_mm", "pitch_x_mm", "pitch_y_mm",
+    "trace_w_mm", "gap_mm", "clearance_mm", "edge_keepout_mm", "board_edge_clear_mm",
+    "center_clear_mm", "edge_clear_mm", "via_drill_mm", "via_dia_mm",
+    "routing_margin_mm", "follow_main_padding_mm", "cable_length_mm", "tail_width_mm", "tail_side_padding_mm",
+    "connector_shoulder_fillet_mm"];
+  const p = {};
+  for (const id of ids) {
+    const value = document.getElementById(id).value;
+    const parsed = parseFloat(value);
+    if (id === "tail_width_mm") {
+      p[id] = Number.isFinite(parsed) ? parsed : null;
+    } else {
+      p[id] = Number.isFinite(parsed) ? parsed : 0;
+    }
+  }
+  p.board_mode = selectedBoardMode();
+  // In rows/cols mode the backend solves pixel size and pitch from the outline,
+  // so the pixel_*/pitch_* values above are sent but ignored. Only send the
+  // targets in that mode — sending them always would override the size fields.
+  if (selectedGridMode() === "count") {
+    p.target_cols = Math.max(1, Math.round(parseFloat(document.getElementById("target_cols").value) || 1));
+    p.target_rows = Math.max(1, Math.round(parseFloat(document.getElementById("target_rows").value) || 1));
+  }
+  // Legacy flags, still sent so an older backend keeps behaving; the current
+  // backend derives both from board_mode and ignores them.
+  p.preserve_sensors = true;
+  p.auto_expand_board = p.board_mode === "expand";
+  p.follow_main_padding = document.getElementById("follow_main_padding").checked;
+  p.smooth_follow_padding = document.getElementById("smooth_follow_padding").checked;
+  if (!p.auto_expand_board) {
+    p.follow_main_padding = false;
+    p.follow_main_padding_mm = 0;
+    p.smooth_follow_padding = false;
+  }
+  return p;
+}
+
+// ---- pixel footprint preview ----
+// Mirrors backend/export/kicad_footprint.py's pixel_geometry() exactly (same
+// variable names/formulas) so this preview always matches the footprint a
+// real Generate call would produce.
+const pixelPreviewIds = ["pixel_w_mm", "pixel_h_mm", "trace_w_mm", "gap_mm", "center_clear_mm", "edge_clear_mm", "via_drill_mm", "via_dia_mm"];
+const pixelPreviewEl = document.getElementById("pixel-preview");
+
+function getNum(id) {
+  const el = document.getElementById(id);
+  return el ? parseFloat(el.value) : 0;
+}
+
+function renderPixelPreview() {
+  if (!pixelPreviewEl) return;
+  const w = getNum("pixel_w_mm");
+  const h = getNum("pixel_h_mm");
+  const tw = getNum("trace_w_mm");
+  const gp = getNum("gap_mm");
+  const cc = getNum("center_clear_mm");
+  const ec = getNum("edge_clear_mm");
+  const vDrill = getNum("via_drill_mm");
+  const vDia = getNum("via_dia_mm");
+
+  const x1 = -w / 2, y1 = -h / 2, x2 = w / 2, y2 = h / 2;
+  const ix1 = x1 + ec, iy1 = y1 + ec;
+  const ix2 = x2 - ec, iy2 = y2 - ec;
+  const innerW = ix2 - ix1;
+  const innerH = iy2 - iy1;
+
+  if (!(innerW > tw) || !(innerH > tw)) {
+    pixelPreviewEl.innerHTML = '<div class="pixel-info">Invalid: pixel edge clearance too large for this pixel/trace size</div>';
+    return;
+  }
+
+  const xL = ix1 + tw / 2;
+  const xR = ix2 - tw / 2;
+  const ymid = (iy1 + iy2) / 2;
+  const pitch = tw + gp;
+  const totalSlots = Math.max(1, Math.floor((innerH + gp) / pitch));
+  const span = totalSlots * tw + (totalSlots - 1) * gp;
+  const y0 = (iy1 + iy2 - span) / 2 + tw / 2;
+  const spineYlo = iy1 + tw / 2;
+  const spineYhi = iy2 - tw / 2;
+  const xEndLeftMax = xR - (cc + tw);
+  const xEndRightMin = xL + (cc + tw);
+  const viaX = ix1 + vDia / 2;
+  const viaY = ymid;
+
+  const pad = Math.max(w, h) * 0.12;
+  const labelSpace = 0.5;
+  const svgX1 = x1 - pad;
+  const svgW = w + 2 * pad;
+  const svgH = h + 2 * pad + labelSpace;
+  const fy = (v) => (pad + labelSpace) + (y2 - v);
+
+  const col1 = "#2673d9";
+  const col2 = "#d94026";
+  const strokeW = tw;
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${svgX1.toFixed(3)} 0 ${svgW.toFixed(3)} ${svgH.toFixed(3)}">`;
+  svg += `<rect x="${x1}" y="${fy(y2)}" width="${w}" height="${h}" fill="none" stroke="#666" stroke-width="0.06"/>`;
+  svg += `<rect x="${ix1}" y="${fy(iy2)}" width="${innerW}" height="${innerH}" fill="none" stroke="#aaa" stroke-width="0.03" stroke-dasharray="0.1"/>`;
+  svg += `<line x1="${xL}" y1="${fy(spineYlo)}" x2="${xL}" y2="${fy(spineYhi)}" stroke="${col1}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
+  svg += `<line x1="${xR}" y1="${fy(spineYlo)}" x2="${xR}" y2="${fy(spineYhi)}" stroke="${col2}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
+  for (let i = 0; i < totalSlots; i++) {
+    const yy = y0 + i * pitch;
+    if (i % 2 === 0) {
+      svg += `<line x1="${xL}" y1="${fy(yy)}" x2="${xEndLeftMax}" y2="${fy(yy)}" stroke="${col1}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
+    } else {
+      svg += `<line x1="${xR}" y1="${fy(yy)}" x2="${xEndRightMin}" y2="${fy(yy)}" stroke="${col2}" stroke-width="${strokeW}" stroke-linecap="butt"/>`;
+    }
+  }
+  svg += `<circle cx="${viaX}" cy="${fy(viaY)}" r="${vDia / 2}" fill="${col1}" fill-opacity="0.3" stroke="${col1}" stroke-width="0.02"/>`;
+  svg += `<circle cx="${viaX}" cy="${fy(viaY)}" r="${vDrill / 2}" fill="white" stroke="#555" stroke-width="0.02"/>`;
+  const labelY = fy(y2) - 0.15;
+  svg += `<text x="${xL}" y="${labelY}" text-anchor="middle" font-size="0.35" fill="${col1}" font-weight="bold">Pad 1</text>`;
+  svg += `<text x="${xR}" y="${labelY}" text-anchor="middle" font-size="0.35" fill="${col2}" font-weight="bold">Pad 2</text>`;
+  svg += "</svg>";
+  svg += `<div class="pixel-info">${w.toFixed(1)} × ${h.toFixed(1)} mm · ${totalSlots} fingers · trace ${tw} gap ${gp}</div>`;
+
+  pixelPreviewEl.innerHTML = svg;
+}
+
+pixelPreviewIds.forEach((id) => {
+  document.getElementById(id)?.addEventListener("input", renderPixelPreview);
+});
+
+// Larger sizes in the same 0.5mm-pitch FPC family as the auto-selected
+// connectors, offered only when the user explicitly wants a bigger one
+// (e.g. to match an existing/larger readout board) — mirrors
+// backend/pipeline/layout.py's CONNECTOR_FAMILY. The backend re-validates
+// the chosen size regardless, so this list only needs to drive the dropdown.
+const CONNECTOR_FAMILY = [20, 30, 40, 50, 60, 70, 80, 90, 100];
+const connectorUpsizeEl = document.getElementById("connector-upsize");
+const connectorUpsizeSelect = document.getElementById("connector-upsize-select");
+const connectorUpsizeBtn = document.getElementById("connector-upsize-btn");
+
+function updateConnectorUpsizeControl(currentConnectorPos) {
+  const larger = CONNECTOR_FAMILY.filter((n) => n > currentConnectorPos);
+  if (!larger.length) {
+    connectorUpsizeEl.hidden = true;
+    return;
+  }
+  connectorUpsizeSelect.innerHTML = larger.map((n) => `<option value="${n}">${n}-pos</option>`).join("");
+  connectorUpsizeEl.hidden = false;
+}
+
+async function runGenerate(overrides = {}) {
+  if (vertices.length < 3) {
+    genStatus.innerHTML = `<span class="error">Need at least 3 outline vertices.</span>`;
+    return;
+  }
+  genStatus.textContent = "Generating… (may take a few seconds)";
+  statsEl.innerHTML = "";
+  connectorUpsizeEl.hidden = true;
+  downloadBtn.disabled = true;
+  lastZipB64 = null;
+
+  const body = {
+    outline: vertices,
+    ...(fillVertices.length >= 3 ? { fill_region: fillVertices } : {}),
+    ...readParams(),
+    ...overrides,
+  };
+  try {
+    const resp = await fetch(`${API_BASE}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    showSolvedGridSize(data.edit_data);
+    if (data.edit_data) {
+      routeEditor.load(data.edit_data, data.svg);
+    } else {
+      pcbPreview.innerHTML = data.svg;
+      routeEditStatus.textContent = "";
+    }
+    lastZipB64 = data.zip_b64;
+    downloadBtn.disabled = false;
+    renderStats(data.stats, data.drc);
+    updateConnectorUpsizeControl(data.stats.connector_pos);
+    tailExtensionPromptDismissed = false;
+    if (data.edit_data && !data.stats?.tail_extension_enabled) {
+      showTailExtensionPrompt();
+    } else {
+      hideTailExtensionPrompt();
+    }
+    genStatus.textContent = "Done.";
+  } catch (err) {
+    genStatus.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+  }
+}
+
+document.getElementById("generate").addEventListener("click", () => runGenerate());
+
+connectorUpsizeBtn.addEventListener("click", async () => {
+  const chosen = parseInt(connectorUpsizeSelect.value, 10);
+  if (!Number.isFinite(chosen)) return;
+  // Lightweight swap: keeps the existing routes untouched (connector pads
+  // are always assigned centered on the connector body, so already-used
+  // pads sit at the same physical position regardless of connector size —
+  // only the pad *numbers* and the board's Edge.Cuts envelope around the
+  // connector housing change). No re-pack/re-route, unlike Generate.
+  if (!routeEditor.hasEditableRoutes()) return;
+  genStatus.textContent = `Switching to a ${chosen}-pos connector…`;
+  try {
+    const data = await routeEditor.resizeConnector(chosen);
+    lastZipB64 = null;
+    downloadBtn.disabled = false;
+    updateConnectorUpsizeControl(data.stats.connector_pos);
+    genStatus.textContent = "Done.";
+  } catch (err) {
+    genStatus.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+  }
+});
+
+function renderStats(stats, drc) {
+  const tailWidth = `${stats.tail_width_mm} mm`;
+  const rows = [
+    ["Total pixels", stats.total_pixels],
+    ["Active pixels", stats.active_pixels],
+    ["Removed pixels", stats.removed_pixels],
+    ["Column routes", stats.col_routes],
+    ["Row routes", stats.row_routes],
+    ["Connector", `${stats.connector_pos}-pos${stats.connector_swap ? " (swapped row/column pad groups)" : ""}`],
+    ["Connector export", stats.connector_export_enabled ? "on" : "off"],
+    ...(stats.connector_export_warning ? [["Connector warning", stats.connector_export_warning]] : []),
+    ["Board mode", stats.board_mode === "fixed_keepout" ? "keep outline fixed" : "grow to fit wiring"],
+    ...(stats.board_mode === "fixed_keepout" ? [
+      ["Pixels dropped for wiring", `${stats.dropped_by_keepout || 0} of ${stats.max_pack_pixels || 0} max-packed`],
+      ["Keep-out width", `${stats.fixed_keepout_min_mm || 0} mm thinnest → ${stats.fixed_keepout_max_mm || 0} mm at the tail`],
+      ["Keep-out passes", `${stats.fixed_keepout_iterations || 0} carve, ${stats.fixed_keepout_route_attempts || 0} routing`],
+      ["Keep-out routing", stats.fixed_keepout_routing_clean ? "clean"
+        : `warnings — copper ${stats.fixed_keepout_worst_escape_mm || 0} mm past the edge`],
+    ] : []),
+    ["Fixed-board routing", stats.fixed_board_routing ? "on" : "off"],
+    ["Perimeter routing attempted", stats.perimeter_routing_attempted ? "yes" : "no"],
+    ...(stats.removal_reason ? [["Removal reason", stats.removal_reason]] : []),
+    ["Removed by routing failure", stats.removed_by_routing_failure || 0],
+    ["Bad nets before removal", stats.bad_nets_before_removal || 0],
+    ["Routing margin", `${stats.routing_margin_mm} mm`],
+    ["Applied expansion", `${stats.routing_margin_applied_mm} mm`],
+    ["Left routing padding", `${stats.routing_left_padding_mm || 0} mm`],
+    ["Right routing padding", `${stats.routing_right_padding_mm || 0} mm`],
+    ["Side routing padding", `${stats.routing_side_padding_mm || 0} mm`],
+    ["Top routing padding", `${stats.routing_top_padding_mm || 0} mm`],
+    ["Bottom routing padding", `${stats.routing_bottom_padding_mm || 0} mm`],
+    ["Routing routes counted", stats.routing_route_count || 0],
+    ["Follow padding", stats.follow_main_padding ? "on" : "off"],
+    ["Follow distance", `${stats.follow_main_padding_mm || 0} mm`],
+    ["Smooth follow edge", stats.smooth_follow_padding ? "on" : "off"],
+    ["Final outline mode", stats.final_outline_mode || "rectangular"],
+    ["Tail shoulder expansion", stats.tail_shoulder_expansion ? `${stats.tail_shoulder_width_mm} mm` : "off"],
+    ["Tail pocket depth", `${stats.tail_pocket_depth_mm || 0} mm`],
+    ["Post-route containment", stats.post_route_containment_expansion ? `${stats.post_route_containment_buffer_mm} mm` : "off"],
+    ["Max route outside", `${stats.max_route_outside_distance_mm || 0} mm`],
+    ["Row routes left", stats.row_routes_left || 0],
+    ["Row routes right", stats.row_routes_right || 0],
+    ["Routing warning pixels", stats.routing_problem_pixels],
+    ["Routing warning nets", stats.routing_warning_nets],
+    ["Tail length", `${stats.tail_length_mm} mm`],
+    ["Tail width", tailWidth],
+    ["Tail side padding", `${stats.tail_side_padding_mm} mm`],
+    ["Pad center span", `${stats.connector_pad_center_span_mm || 0} mm`],
+    ["Copper span", `${stats.connector_copper_span_mm || 0} mm`],
+    ["Tab tip width", `${stats.connector_tab_tip_width_mm || 0} mm`],
+    ["Ear/stiffener width", `${stats.connector_ear_stiffener_width_mm || 0} mm`],
+    ["Tail extension", stats.tail_extension_enabled ? `${stats.tail_extension_length_mm} mm` : "off"],
+    ["Tail extension width", stats.tail_extension_enabled ? `${stats.tail_extension_width_mm} mm` : "off"],
+    ["DRC violations", drc.violations],
+  ];
+  statsEl.innerHTML =
+    "<table>" +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
+    "</table>" +
+    renderDrcDetails(drc);
+}
+
+function renderDrcDetails(drc) {
+  if (!drc) return "";
+  const routeWarnings = (drc.routing_warning_nets || []).slice(0, 8);
+  const warningHtml = routeWarnings.length
+    ? `<p><strong>Routing warnings:</strong> ${routeWarnings.join(", ")}</p>`
+    : "";
+  if (!drc.details || !drc.details.length) return warningHtml;
+  const items = drc.details.slice(0, 6).map((v) => {
+    const names = v.net2 === "BOARD_EDGE" ? `${v.net1} → edge` : `${v.net1} ↔ ${v.net2}`;
+    const req = v.min_required == null ? "" : ` / ${v.min_required} mm required`;
+    return `<li>${v.layer} ${v.type}: ${names}, ${v.distance} mm${req}</li>`;
+  }).join("");
+  return `<div class="drc-details">${warningHtml}<strong>DRC details</strong><ul>${items}</ul></div>`;
+}
+
+// ---- download zip (base64 -> Blob) ----
+downloadBtn.addEventListener("click", async () => {
+  if (routeEditor.hasEditableRoutes()) {
+    try {
+      await routeEditor.exportEdited({ download: true });
+    } catch (error) {
+      routeEditStatus.innerHTML = `<span class="error">Edited export failed: ${error.message}</span>`;
+    }
+    return;
+  }
+  downloadZip(lastZipB64, "tactile_pcb.zip");
+});
+
+// ---- health ping ----
+(async function pingHealth() {
+  const el = document.getElementById("health");
+  try {
+    const r = await fetch(`${API_BASE}/health`);
+    if (r.ok) { el.textContent = "backend: ok"; el.className = "health health--ok"; return; }
+    throw new Error();
+  } catch {
+    el.textContent = "backend: unreachable"; el.className = "health health--down";
+  }
+})();
+
+redraw();
+setOutlineInfo();
+syncDimensionFields();
+updateCadButtons();
+updateTargetButtons();
 renderPixelPreview();
