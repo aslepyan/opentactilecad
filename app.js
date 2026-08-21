@@ -1502,15 +1502,47 @@ downloadBtn.addEventListener("click", async () => {
 });
 
 // ---- health ping ----
-(async function pingHealth() {
+// Retries rather than probing once. When the backend is a free-tier Render
+// instance it sleeps after ~15 minutes idle and takes 30-60s to wake, so the
+// first visitor after a quiet spell always hits a booting service. A single
+// fetch fails against that and latches the badge to "unreachable" for the rest
+// of the page's life — reporting the backend as down when it is merely cold,
+// and never correcting itself once it comes up.
+(function pingHealth() {
   const el = document.getElementById("health");
-  try {
-    const r = await fetch(`${API_BASE}/health`);
-    if (r.ok) { el.textContent = "backend: ok"; el.className = "health health--ok"; return; }
-    throw new Error();
-  } catch {
-    el.textContent = "backend: unreachable"; el.className = "health health--down";
+  const DEADLINE_MS = 90000;   // covers a cold start with room to spare
+  const started = Date.now();
+  let delay = 1000;
+
+  async function attempt() {
+    try {
+      // Per-try timeout: a request to a waking instance can hang well past the
+      // point where retrying is the better move.
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 10000);
+      const r = await fetch(`${API_BASE}/health`, { signal: ctl.signal, cache: "no-store" });
+      clearTimeout(t);
+      if (r.ok) {
+        el.textContent = "backend: ok";
+        el.className = "health health--ok";
+        return;
+      }
+    } catch {
+      /* fall through to the retry below */
+    }
+    if (Date.now() - started < DEADLINE_MS) {
+      el.textContent = "backend: waking\u2026";
+      el.className = "health health--unknown";
+      el.title = "The backend sleeps when idle and takes up to a minute to start.";
+      setTimeout(attempt, delay);
+      delay = Math.min(delay * 1.6, 8000);
+      return;
+    }
+    el.textContent = "backend: unreachable";
+    el.className = "health health--down";
+    el.title = "Could not reach " + (API_BASE || "the backend") + " after 90s.";
   }
+  attempt();
 })();
 
 redraw();
