@@ -450,6 +450,12 @@ button.mode-button.active {
 .generate-actions {
   margin-top: 0;
 }
+/* Spans both grid columns so it lands on its own row at the very bottom of the
+   panel, below the stats and the connector controls. */
+.generate-download {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
 .generate-panel #gen-status {
   margin-top: 8px;
 }

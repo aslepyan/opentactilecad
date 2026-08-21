@@ -306,7 +306,6 @@
           <div class="generate-panel__body">
             <div class="row generate-actions">
               <button id="generate" type="button" class="primary">Generate PCB</button>
-              <button id="download" type="button" class="secondary" disabled>Download ZIP</button>
             </div>
             <div id="gen-status" class="mini"></div>
             <div id="connector-upsize" class="connector-upsize" hidden>
@@ -322,6 +321,11 @@
               <button id="connector-upsize-btn" type="button" class="secondary">Use this size</button>
             </div>
             <div id="stats"></div>
+            <!-- Last in the panel because it is the last step: generate, read the
+                 stats, adjust the connector if needed, then download. -->
+            <div class="row generate-download">
+              <button id="download" type="button" class="secondary" disabled>Download ZIP</button>
+            </div>
           </div>
         </div>
 
