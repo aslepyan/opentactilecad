@@ -450,11 +450,13 @@ button.mode-button.active {
 .generate-actions {
   margin-top: 0;
 }
-/* Spans both grid columns so it lands on its own row at the very bottom of the
-   panel, below the stats and the connector controls. */
-.generate-download {
-  grid-column: 1 / -1;
-  margin-top: 4px;
+/* The download step, as its own panel at the foot of the views column. flex:none
+   so it keeps its natural height and does not compete with .view--grow above. */
+.download-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  flex: 0 0 auto;
 }
 .generate-panel #gen-status {
   margin-top: 8px;

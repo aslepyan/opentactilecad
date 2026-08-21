@@ -321,11 +321,6 @@
               <button id="connector-upsize-btn" type="button" class="secondary">Use this size</button>
             </div>
             <div id="stats"></div>
-            <!-- Last in the panel because it is the last step: generate, read the
-                 stats, adjust the connector if needed, then download. -->
-            <div class="row generate-download">
-              <button id="download" type="button" class="secondary" disabled>Download ZIP</button>
-            </div>
           </div>
         </div>
 
@@ -384,6 +379,12 @@
             <div id="tail-extension-info" class="mini"></div>
           </div>
           <div id="route-edit-status" class="mini"></div>
+        </div>
+
+        <!-- Last panel in the column, below the preview: you generate, inspect
+             the board above, and only then download it. -->
+        <div class="panel download-bar">
+          <button id="download" type="button" class="primary" disabled>Download ZIP</button>
         </div>
       </section>
     </main>
