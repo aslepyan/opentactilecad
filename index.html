@@ -200,7 +200,7 @@
               <input type="radio" name="board_mode" value="fixed_keepout" />
               Keep outline fixed, shrink sensor grid
             </label>
-            <label class="check-field" title="New router: wires hug the sensor field instead of walking a grid. Rows/columns cut apart by a concavity stay one net, bridged by a trace around the concavity (fewer connector pads). Grow-board mode only. Uncheck to compare against the original router.">
+            <label class="check-field" title="New router: wires hug the sensor field instead of walking a grid. Rows/columns cut apart by a concavity stay one net where possible, bridged by a trace around the concavity. In fixed-outline mode the wiring keep-out band is sized exactly from the routing plan. Uncheck to compare against the original router.">
               <input id="hug_router" type="checkbox" checked />
               Hug routing (new): wires follow the sensor shape
             </label>

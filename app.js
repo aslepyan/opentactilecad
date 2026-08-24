@@ -1080,14 +1080,9 @@ function selectedBoardMode() {
   return picked ? picked.value : "expand";
 }
 
-// Hug routing is grow-mode only: grey the checkbox out in fixed-outline mode
-// so it's visibly inactive instead of silently ignored.
-const hugRouterInput = document.getElementById("hug_router");
-function syncHugRouterEnabled() {
-  hugRouterInput.disabled = selectedBoardMode() !== "expand";
-}
-boardModeInputs.forEach((el) => el.addEventListener("change", syncHugRouterEnabled));
-syncHugRouterEnabled();
+// Hug routing works in both board modes now (fixed-outline sizes its wiring
+// keep-out band exactly from the hug routing plan), so the checkbox is never
+// greyed out.
 
 // Sensor grid: either the taxel size is given and the count follows, or the
 // count is given and the backend solves the size (grow-board mode only — see
@@ -1230,9 +1225,7 @@ function readParams() {
     }
   }
   p.board_mode = selectedBoardMode();
-  // Hug router is grow-mode only for now; the backend rejects other combos.
-  p.router = (p.board_mode === "expand" && document.getElementById("hug_router").checked)
-    ? "hug" : "legacy";
+  p.router = document.getElementById("hug_router").checked ? "hug" : "legacy";
   // In rows/cols mode the backend solves pixel size and pitch from the outline,
   // so the pixel_*/pitch_* values above are sent but ignored. Only send the
   // targets in that mode — sending them always would override the size fields.
