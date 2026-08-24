@@ -200,8 +200,8 @@
               <input type="radio" name="board_mode" value="fixed_keepout" />
               Keep outline fixed, shrink sensor grid
             </label>
-            <label class="check-field" title="New router: wires hug the sensor field instead of walking a grid. Rows/columns cut apart by a concavity stay one net, bridged by a trace around the concavity (fewer connector pads). Grow-board mode only.">
-              <input id="hug_router" type="checkbox" />
+            <label class="check-field" title="New router: wires hug the sensor field instead of walking a grid. Rows/columns cut apart by a concavity stay one net, bridged by a trace around the concavity (fewer connector pads). Grow-board mode only. Uncheck to compare against the original router.">
+              <input id="hug_router" type="checkbox" checked />
               Hug routing (new): wires follow the sensor shape
             </label>
           </div>
@@ -297,6 +297,13 @@
             <div class="row">
               <button id="preset-square" type="button">Square 40×40</button>
               <button id="preset-rect" type="button">Rect 50×30</button>
+              <button id="preset-L" type="button" title="L-shape — one concave corner">L</button>
+              <button id="preset-C" type="button" title="C-shape — a notch splits 10 of 14 columns">C</button>
+              <button id="preset-deepC" type="button" title="Deeper, wider C notch">Deep C</button>
+              <button id="preset-U" type="button" title="U — the notch opens onto the cable edge, cutting rows">U</button>
+              <button id="preset-T" type="button" title="T — narrow stem into a wide top">T</button>
+              <button id="preset-eight" type="button" title="Two lobes joined by a waist">Eight</button>
+              <button id="preset-foot" type="button" title="Foot/insole-like asymmetric outline">Foot</button>
               <button id="clear-outline" type="button" class="secondary">Clear outline</button>
             </div>
             <div id="outline-info" class="mini">0 outline vertices</div>

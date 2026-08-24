@@ -921,24 +921,36 @@ clearOutlineBtn.addEventListener("click", () => {
   syncDimensionFields();
   updateCadButtons();
 });
-document.getElementById("preset-square").addEventListener("click", () => {
-  if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
-  pushUndo();
-  setActiveArray([[-20, -20], [20, -20], [20, 20], [-20, 20]]);
-  if (editTarget === "outline") foldLines = [];
-  selected = null;
-  angleReferenceEdge = null;
-  fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
-});
-document.getElementById("preset-rect").addEventListener("click", () => {
-  if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
-  pushUndo();
-  setActiveArray([[-25, -15], [25, -15], [25, 15], [-25, 15]]);
-  if (editTarget === "outline") foldLines = [];
-  selected = null;
-  angleReferenceEdge = null;
-  fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
-});
+// Preset outlines. The FIRST edge (vertex 0 -> 1) becomes the cable edge, same
+// rule as hand-drawn outlines. The concave shapes match the routing regression
+// harness exactly, so results here should reproduce the tested numbers.
+const PRESET_SHAPES = {
+  "preset-square": [[-20, -20], [20, -20], [20, 20], [-20, 20]],
+  "preset-rect":   [[-25, -15], [25, -15], [25, 15], [-25, 15]],
+  "preset-L":      [[-30, 0], [30, 0], [30, 16], [-6, 16], [-6, 50], [-30, 50]],
+  "preset-C":      [[-30, 0], [30, 0], [30, 12], [-12, 12], [-12, 38], [30, 38],
+                    [30, 50], [-30, 50]],
+  "preset-deepC":  [[-34, 0], [34, 0], [34, 10], [-18, 10], [-18, 46], [34, 46],
+                    [34, 56], [-34, 56]],
+  "preset-U":      [[-34, 0], [-12, 0], [-12, 34], [12, 34], [12, 0], [34, 0],
+                    [34, 56], [-34, 56]],
+  "preset-T":      [[-12, 0], [12, 0], [12, 34], [34, 34], [34, 52], [-34, 52],
+                    [-34, 34], [-12, 34]],
+  "preset-eight":  [[-24, 0], [24, 0], [24, 24], [6, 32], [6, 36], [24, 44],
+                    [24, 68], [-24, 68], [-24, 44], [-6, 36], [-6, 32], [-24, 24]],
+  "preset-foot":   [[-30, 0], [16, 0], [16, 14], [-4, 22], [-4, 52], [-30, 52]],
+};
+for (const [id, coords] of Object.entries(PRESET_SHAPES)) {
+  document.getElementById(id).addEventListener("click", () => {
+    if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
+    pushUndo();
+    setActiveArray(coords.map((p) => [p[0], p[1]]));
+    if (editTarget === "outline") foldLines = [];
+    selected = null;
+    angleReferenceEdge = null;
+    fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
+  });
+}
 
 function confirmOverwrite(arrLength, itemLabel) {
   if (!arrLength) return true;
@@ -1067,6 +1079,15 @@ function selectedBoardMode() {
   const picked = boardModeInputs.find((el) => el.checked);
   return picked ? picked.value : "expand";
 }
+
+// Hug routing is grow-mode only: grey the checkbox out in fixed-outline mode
+// so it's visibly inactive instead of silently ignored.
+const hugRouterInput = document.getElementById("hug_router");
+function syncHugRouterEnabled() {
+  hugRouterInput.disabled = selectedBoardMode() !== "expand";
+}
+boardModeInputs.forEach((el) => el.addEventListener("change", syncHugRouterEnabled));
+syncHugRouterEnabled();
 
 // Sensor grid: either the taxel size is given and the count follows, or the
 // count is given and the backend solves the size (grow-board mode only — see
