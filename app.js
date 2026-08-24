@@ -1209,6 +1209,9 @@ function readParams() {
     }
   }
   p.board_mode = selectedBoardMode();
+  // Hug router is grow-mode only for now; the backend rejects other combos.
+  p.router = (p.board_mode === "expand" && document.getElementById("hug_router").checked)
+    ? "hug" : "legacy";
   // In rows/cols mode the backend solves pixel size and pitch from the outline,
   // so the pixel_*/pitch_* values above are sent but ignored. Only send the
   // targets in that mode — sending them always would override the size fields.
@@ -1423,6 +1426,7 @@ function renderStats(stats, drc) {
     ["Connector export", stats.connector_export_enabled ? "on" : "off"],
     ...(stats.connector_export_warning ? [["Connector warning", stats.connector_export_warning]] : []),
     ["Board mode", stats.board_mode === "fixed_keepout" ? "keep outline fixed" : "grow to fit wiring"],
+    ["Router", stats.router === "hug" ? "hug (wires follow the sensor shape)" : "legacy"],
     ...(stats.board_mode === "fixed_keepout" ? [
       ["Pixels dropped for wiring", `${stats.dropped_by_keepout || 0} of ${stats.max_pack_pixels || 0} max-packed`],
       ["Keep-out width", `${stats.fixed_keepout_min_mm || 0} mm thinnest → ${stats.fixed_keepout_max_mm || 0} mm at the tail`],

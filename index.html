@@ -200,6 +200,10 @@
               <input type="radio" name="board_mode" value="fixed_keepout" />
               Keep outline fixed, shrink sensor grid
             </label>
+            <label class="check-field" title="New router: wires hug the sensor field instead of walking a grid. Rows/columns cut apart by a concavity stay one net, bridged by a trace around the concavity (fewer connector pads). Grow-board mode only.">
+              <input id="hug_router" type="checkbox" />
+              Hug routing (new): wires follow the sensor shape
+            </label>
           </div>
           <details class="advanced">
             <summary>Advanced board-shape controls</summary>
