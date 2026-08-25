@@ -318,6 +318,19 @@ function selectFaceAt(clientX, clientY) {
   }
 
   if (selectionMode === "single") {
+    // On a finely tessellated curved part, "one planar face" is often a single
+    // sub-millimetre triangle. Unfolding it silently replaces the board outline
+    // with a sliver that can't fit any taxel and Generate fails much later with
+    // a confusing error — catch it here, at the click, with the actual fix.
+    const regionArea = surfaceModel.regions[regionId].area;
+    if (regionArea < 4) {
+      const areaText = regionArea < 0.05 ? "less than 0.1" : regionArea.toFixed(1);
+      showError(
+        `That flat face is only ${areaText} mm² — too small for a sensor. ` +
+        `The part is probably curved here: switch to "Curved surface" mode to select the whole smooth patch.`,
+      );
+      return;
+    }
     selectedRegions = new Set([regionId]);
     selectedTriangles = new Set();
     rootTriangleId = null;
@@ -1013,7 +1026,33 @@ selectAllBtn.addEventListener("click", () => {
   unfoldCurrentSelection();
 });
 
-unfoldBtn.addEventListener("click", unfoldCurrentSelection);
+// The client-side unfold is synchronous and can block the page for tens of
+// seconds on a large curved selection (measured: ~65s for a 17k-triangle
+// patch) — without this deferred start the button click freezes the tab with
+// no feedback at all and reads as a crash. Paint the status first, then work.
+unfoldBtn.addEventListener("click", () => {
+  const triangleCount = combinedSelectedTriangles().size;
+  // Only the connected, client-side unfold blocks the thread; the
+  // disconnected-selection path goes to the backend chain endpoint, which is
+  // async and manages its own button/status state.
+  if (triangleCount > 4000 && !selectionIsDisconnected()) {
+    infoEl.textContent =
+      `${loadedName} · unfolding ${triangleCount.toLocaleString()} triangles — ` +
+      `this can take a minute for a selection this large; the page may freeze meanwhile…`;
+    unfoldBtn.disabled = true;
+    document.body.style.cursor = "progress";
+    window.setTimeout(() => {
+      try {
+        unfoldCurrentSelection();
+      } finally {
+        unfoldBtn.disabled = false;
+        document.body.style.cursor = "";
+      }
+    }, 50);
+    return;
+  }
+  unfoldCurrentSelection();
+});
 clearFaceBtn.addEventListener("click", () => clearSelection(true));
 
 resetBtn.addEventListener("click", () => {

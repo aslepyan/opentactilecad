@@ -31,14 +31,19 @@ function modeStep(mode) {
     return [{
       view: "tool", mode: "stl", selector: "#stl-sidebar-group",
       title: "Mode: Import an STL",
-      body: "This is what \"Import an STL\" from the start screen opens. Upload a 3D model of the real part your sensor will wrap around, click a face (or a smoothly curved patch), then press Unfold selection — it flattens that surface to true scale, like unwrapping paper from the part, so the resulting flex PCB fits it exactly.",
+      body: "This is what \"Import an STL\" from the start screen opens. Upload a 3D model of the real part your sensor will wrap around, click a face (or a smoothly curved patch), then press Unfold selection — it flattens that surface to true scale, like unwrapping paper from the part, so the resulting flex PCB fits it exactly. Selecting several surfaces that don't share an edge? The tool walks you through clicking matching corner points on each, so you control exactly how they join.",
     }];
   }
   return [
     {
       view: "tool", mode: "draw", selector: "#cad-line",
       title: "Mode: Draw a shape",
-      body: "This is what \"Draw a shape\" from the start screen opens. Use Line, Rectangle, H/V, or Arc to sketch your board outline on the canvas. The first edge you draw becomes the cable edge, shown in orange.",
+      body: "This is what \"Draw a shape\" from the start screen opens. Use Line, Rectangle, H/V, or Arc to sketch your board outline on the canvas.",
+    },
+    {
+      view: "tool", selector: "#cad-set-cable",
+      title: "Choose the cable edge",
+      body: "Every sensor needs a flat ribbon cable running to your electronics. After drawing, click the edge where that cable should exit and press Set cable edge — it turns orange. Generate stays blocked until you've chosen one, so a stray first stroke can never silently become the connector edge.",
     },
     {
       view: "tool", selector: ".cad-fields",

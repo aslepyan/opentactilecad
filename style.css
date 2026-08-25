@@ -88,6 +88,72 @@ button.linklike:hover:not(:disabled) { color: var(--text); border-color: var(--l
 .mode-card p { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 14px; flex: 1; }
 .mode-card__cta { align-self: flex-start; }
 
+/* ---- landing: mini glossary ---- */
+.landing-glossary { margin-top: 14px; padding: 14px 18px; font-size: 13px; }
+.landing-glossary strong { display: block; margin-bottom: 8px; }
+.landing-glossary dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 18px;
+  margin: 0;
+}
+.landing-glossary dt { color: var(--accent); font-weight: 600; }
+.landing-glossary dd { margin: 0 0 4px; color: var(--muted); line-height: 1.45; }
+
+/* ---- landing: example design gallery ---- */
+.landing-section-sub {
+  max-width: 720px;
+  margin: -4px auto 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.landing-examples {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.example-card { padding: 14px; display: flex; flex-direction: column; }
+.example-card__thumb {
+  height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  padding: 8px;
+}
+.example-card__thumb svg { max-width: 100%; max-height: 100%; width: auto; height: 94px; }
+.example-card h2 { font-size: 15px; margin: 0 0 6px; }
+.example-card p { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 0 0 10px; flex: 1; }
+.example-card__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.example-card__foot button { flex: none; white-space: nowrap; }
+.example-card__facts { font-size: 11px; color: var(--muted); line-height: 1.35; }
+
+/* ---- landing: local install + Claude Code guides ---- */
+.landing-guides {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+.guide-card { padding: 18px; font-size: 13px; }
+.guide-card h2 { font-size: 16px; margin: 0 0 8px; }
+.guide-card p { color: var(--muted); line-height: 1.55; margin: 0 0 10px; }
+.guide-card ol { margin: 0 0 10px; padding-left: 20px; color: var(--text); }
+.guide-card li { margin-bottom: 8px; line-height: 1.5; }
+.guide-card a { color: var(--accent); }
+.guide-card code {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+.guide-card__note { font-size: 12px; }
+
 /* ---- in-tool mode switcher ---- */
 .mode-switcher {
   display: flex;
@@ -444,6 +510,12 @@ button.mode-button.active {
 #stats table { width: 100%; border-collapse: collapse; }
 #stats td { padding: 2px 0; color: var(--muted); }
 #stats td:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.stats-details { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+.stats-details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.stats-details summary:hover { color: var(--text); }
+.stats-details table { margin-top: 6px; }
+/* The generated board no longer matches the outline on the canvas. */
+.pcb-preview--stale svg { opacity: 0.35; filter: grayscale(0.6); }
 .drc-details {
   margin-top: 8px;
   color: var(--muted);
@@ -698,6 +770,9 @@ button.mode-button.active {
   .generate-panel__body { grid-template-columns: 1fr; }
   .cad-fields { grid-template-columns: 1fr 1fr; }
   .landing-modes { grid-template-columns: 1fr; }
+  .landing-examples { grid-template-columns: 1fr; }
+  .landing-guides { grid-template-columns: 1fr; }
+  .landing-glossary dl { grid-template-columns: 1fr; }
   .help { grid-template-columns: 1fr; }
   .help-nav { position: static; flex-direction: row; flex-wrap: wrap; }
   .tour-card { width: min(280px, calc(100vw - 24px)); }

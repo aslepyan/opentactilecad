@@ -123,6 +123,18 @@ function pushUndo() {
   if (undoStack.length > 80) undoStack.shift();
   redoStack = [];
   updateCadButtons();
+  markResultsStale();
+}
+
+// Every outline/fill/cable-edge change goes through pushUndo (or an undo/redo
+// restore), so this is the one choke point for flagging that the generated
+// preview and stats no longer match the shape on the canvas. Without it a
+// redrawn outline sits next to the previous design's board and stats, and a
+// first-time user reads the stale result as the new shape's.
+function markResultsStale() {
+  if (!statsEl || !statsEl.innerHTML) return;
+  genStatus.textContent = "Shape changed — press Generate PCB to refresh the preview and stats below.";
+  pcbPreview.classList.add("pcb-preview--stale");
 }
 
 function restoreSnapshot(snapshot) {
@@ -138,6 +150,7 @@ function restoreSnapshot(snapshot) {
   setOutlineInfo();
   syncDimensionFields();
   updateCadButtons();
+  markResultsStale();
 }
 
 function snapPoint(p) {
@@ -1061,6 +1074,51 @@ window.addEventListener("otc:dxf-outline", (e) => {
   showCableEdgeBanner();
 });
 
+// Finished example design from the landing gallery (examples.js): outline +
+// a complete parameter set, generated immediately. The parameters are written
+// into the form first so the loaded design is fully editable afterwards and
+// the fields show exactly what produced the result.
+window.addEventListener("otc:load-example", (e) => {
+  const { outline, params = {}, label = "example" } = e.detail || {};
+  if (!Array.isArray(outline) || outline.length < 3) return;
+  if (!confirmOverwrite(vertices.length, "board outline")) return;
+  pushUndo();
+  editTarget = "outline";
+  updateTargetButtons();
+  vertices = outline.map((p) => [p[0], p[1]]);
+  fillVertices = [];
+  foldLines = [];
+  // Examples ship a designed cable edge as edge 0->1, same as presets.
+  cableEdgeConfirmed = true;
+  selected = null;
+  angleReferenceEdge = null;
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "board_mode") {
+      const radio = boardModeInputs.find((el) => el.value === value);
+      if (radio) radio.checked = true;
+    } else if (key === "router") {
+      const hugEl = document.getElementById("hug_router");
+      if (hugEl) hugEl.checked = value === "hug";
+    } else {
+      const el = document.getElementById(key);
+      if (el) el.value = value === null ? "" : String(value);
+    }
+  }
+  // Examples are stored as explicit taxel sizes, not row/column targets.
+  if (gridSizeModeInput) gridSizeModeInput.checked = true;
+  enforcePitchFloor();
+  syncGridMode();
+  syncAutoExpandControls();
+  renderPixelPreview();
+  hideCableEdgeBanner();
+  fitViewTo(vertices);
+  redraw();
+  setOutlineInfo(`example: ${label}`);
+  syncDimensionFields();
+  updateCadButtons();
+  runGenerate();
+});
+
 // ---- generate ----
 const genStatus = document.getElementById("gen-status");
 const statsEl = document.getElementById("stats");
@@ -1431,19 +1489,36 @@ async function runGenerate(overrides = {}) {
     showCableEdgeBanner();
     return;
   }
-  genStatus.textContent = "Generating… (may take a few seconds)";
-  generateInFlight = true;
-  statsEl.innerHTML = "";
-  connectorUpsizeEl.hidden = true;
-  downloadBtn.disabled = true;
-  lastZipB64 = null;
-
   const body = {
     outline: vertices,
     ...(fillVertices.length >= 3 ? { fill_region: fillVertices } : {}),
     ...readParams(),
     ...overrides,
   };
+  // Catch a hopeless size mismatch before the round trip: an outline smaller
+  // than a single taxel (common after unfolding one tiny STL face) would come
+  // back as a bare "No pixels packed" with no hint at which number is wrong.
+  if (!body.target_cols) {
+    const xs = vertices.map((v) => v[0]), ys = vertices.map((v) => v[1]);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const h = Math.max(...ys) - Math.min(...ys);
+    const needW = body.pixel_w_mm + 2 * body.edge_keepout_mm;
+    const needH = body.pixel_h_mm + 2 * body.edge_keepout_mm;
+    if (w < needW || h < needH) {
+      genStatus.innerHTML =
+        `<span class="error">Your outline is ${w.toFixed(1)} × ${h.toFixed(1)} mm, but a single taxel plus ` +
+        `its edge keepout needs ${needW.toFixed(1)} × ${needH.toFixed(1)} mm. Make the outline bigger, or ` +
+        `reduce Taxel W/H or Edge keepout.</span>`;
+      return;
+    }
+  }
+  genStatus.textContent = "Generating… (may take a few seconds)";
+  generateInFlight = true;
+  pcbPreview.classList.remove("pcb-preview--stale");
+  statsEl.innerHTML = "";
+  connectorUpsizeEl.hidden = true;
+  downloadBtn.disabled = true;
+  lastZipB64 = null;
   try {
     const resp = await fetch(`${API_BASE}/generate`, {
       method: "POST",
@@ -1506,6 +1581,31 @@ connectorUpsizeBtn.addEventListener("click", async () => {
 
 function renderStats(stats, drc) {
   const tailWidth = `${stats.tail_width_mm} mm`;
+  // Headline first: the handful of numbers a first-time user actually needs
+  // to judge the result. The full engineering table (every routing/tail
+  // metric) stays available under a collapsible "All details".
+  const summary = [
+    ["Sensing spots (taxels)", `${stats.active_pixels}`],
+    ["Connector", `${stats.connector_pos}-position FPC, chosen automatically`],
+    ["Board mode", stats.board_mode === "fixed_keepout"
+      ? "outline kept exactly as drawn"
+      : "board grown to fit the wiring"],
+    ["Design check (DRC)", drc.violations === 0
+      ? "0 violations — ready to manufacture"
+      : `${drc.violations} violations — see details below`],
+  ];
+  if (stats.removed_pixels > 0) {
+    summary.push(["Taxels dropped", `${stats.removed_pixels} (couldn't be wired cleanly — try a larger pitch or a simpler shape)`]);
+  }
+  if (stats.board_mode === "fixed_keepout" && (stats.dropped_by_keepout || 0) > 0) {
+    summary.push(["Taxels dropped for wiring room", `${stats.dropped_by_keepout} of ${stats.max_pack_pixels} — grow-board mode keeps them all`]);
+  }
+  if (stats.connector_export_warning) {
+    summary.push(["Connector warning", stats.connector_export_warning]);
+  }
+  if (stats.routing_warning_nets > 0 || stats.routing_problem_pixels > 0) {
+    summary.push(["Routing warnings", `${stats.routing_warning_nets || 0} nets / ${stats.routing_problem_pixels || 0} taxels`]);
+  }
   const rows = [
     ["Total pixels", stats.total_pixels],
     ["Active pixels", stats.active_pixels],
@@ -1562,9 +1662,12 @@ function renderStats(stats, drc) {
   ];
   statsEl.innerHTML =
     "<table>" +
-    rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
+    summary.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
     "</table>" +
-    renderDrcDetails(drc);
+    renderDrcDetails(drc) +
+    "<details class=\"stats-details\"><summary>All routing &amp; tail details</summary><table>" +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
+    "</table></details>";
 }
 
 function renderDrcDetails(drc) {
