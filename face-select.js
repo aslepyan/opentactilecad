@@ -371,6 +371,7 @@ export function unfoldSelectedTriangles(model, selectedTriangleIds, rootTriangle
 
   if (polyArea(centeredOutline) < 0) centeredOutline.reverse();
   centeredOutline = simplifyCollinear(centeredOutline);
+  centeredOutline = rdpSimplifyClosed(centeredOutline, 0.15);
   centeredOutline = rotateToBottomEdge(centeredOutline);
 
   const centeredXs = centeredOutline.map((p) => p[0]);
@@ -1242,6 +1243,7 @@ export function finalizeChainOutline(points) {
   let outline = points.map(([x, y]) => [x - cx, y - cy]);
   if (polyArea(outline) < 0) outline.reverse();
   outline = simplifyCollinear(outline);
+  outline = rdpSimplifyClosed(outline, 0.15);
   outline = rotateToBottomEdge(outline);
   const outXs = outline.map((p) => p[0]);
   const outYs = outline.map((p) => p[1]);
@@ -1353,6 +1355,53 @@ function polyArea(points) {
     sum += a[0] * b[1] - b[0] * a[1];
   }
   return sum / 2;
+}
+
+// Douglas-Peucker for a CLOSED outline, tolerance in mm. Mesh-derived
+// outlines walk one point per boundary vertex, so a gently curved or
+// near-straight stretch arrives as dozens of sub-millimetre segments that
+// are almost — but not exactly — collinear, which the relative-tolerance
+// collinear pass below leaves alone. Collapsing anything that deviates
+// less than a fraction of a trace width is invisible at PCB scale and
+// keeps every real corner.
+function rdpSimplifyClosed(points, epsilonMm) {
+  if (points.length < 4) return points.slice();
+  let split = 0;
+  let best = -1;
+  for (let i = 1; i < points.length; i++) {
+    const d = distance2(points[0], points[i]);
+    if (d > best) { best = d; split = i; }
+  }
+  const half1 = rdpSimplifyOpen(points.slice(0, split + 1), epsilonMm);
+  const half2 = rdpSimplifyOpen(points.slice(split).concat([points[0]]), epsilonMm);
+  const out = half1.slice(0, -1).concat(half2.slice(0, -1));
+  return out.length >= 3 ? out : points.slice();
+}
+
+function rdpSimplifyOpen(points, epsilonMm) {
+  if (points.length < 3) return points.slice();
+  const a = points[0];
+  const b = points[points.length - 1];
+  const abx = b[0] - a[0];
+  const aby = b[1] - a[1];
+  const ab2 = abx * abx + aby * aby;
+  let maxDist = -1;
+  let idx = -1;
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    let d;
+    if (ab2 < 1e-20) {
+      d = Math.hypot(p[0] - a[0], p[1] - a[1]);
+    } else {
+      const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / ab2));
+      d = Math.hypot(p[0] - (a[0] + t * abx), p[1] - (a[1] + t * aby));
+    }
+    if (d > maxDist) { maxDist = d; idx = i; }
+  }
+  if (maxDist <= epsilonMm) return [a, b];
+  const left = rdpSimplifyOpen(points.slice(0, idx + 1), epsilonMm);
+  const right = rdpSimplifyOpen(points.slice(idx), epsilonMm);
+  return left.slice(0, -1).concat(right);
 }
 
 function simplifyCollinear(points, relativeTolerance = 1e-5) {
