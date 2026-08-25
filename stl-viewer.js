@@ -471,6 +471,7 @@ async function unfoldViaBackendChain() {
   chainBusy = true;
   unfoldBtn.disabled = true;
   infoEl.textContent = `${loadedName} · analyzing how ${entries.length} surfaces connect…`;
+  let data = null;
   try {
     const form = new FormData();
     form.append("file", new Blob([stlBuffer]), loadedName || "model.stl");
@@ -487,22 +488,28 @@ async function unfoldViaBackendChain() {
       } catch {}
       throw new Error(detail);
     }
-    chainData = await response.json();
-    chainData.entryCount = entries.length;
-    renderChainPanel();
-    const pending = chainData.pending_connection;
-    if (pending !== null && pending !== undefined) {
-      startCornerPick(pending, chainData.connections[pending]);
-    } else {
-      infoEl.textContent =
-        `${loadedName} · all cuts joined with your corners · ` +
-        `check the preview, then "Use this shape".`;
-    }
+    data = await response.json();
   } catch (error) {
     showError(error.message);
+    return;
   } finally {
+    // Clear BEFORE rendering the panel: its buttons bake `disabled` in at
+    // render time, so rendering while busy left "Use this shape" (and the
+    // pick buttons) permanently disabled.
     chainBusy = false;
     unfoldBtn.disabled = false;
+  }
+
+  chainData = data;
+  chainData.entryCount = entries.length;
+  renderChainPanel();
+  const pending = chainData.pending_connection;
+  if (pending !== null && pending !== undefined) {
+    startCornerPick(pending, chainData.connections[pending]);
+  } else {
+    infoEl.textContent =
+      `${loadedName} · all cuts joined with your corners · ` +
+      `check the preview, then "Use this shape".`;
   }
 }
 
