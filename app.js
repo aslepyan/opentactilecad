@@ -355,19 +355,14 @@ function drawOutlinePolygon() {
   if (vertices.length >= 3) ctx.fill();
   ctx.stroke();
 
-  if (vertices.length >= 2) {
+  // The cable edge is highlighted only once the user has SET it. Before
+  // that, edge 0->1 is just another edge — a tentative dashed preview was
+  // tried and read as "already selected", confusing the required step.
+  if (vertices.length >= 2 && cableEdgeConfirmed) {
     const [ax, ay] = mmToPx(...vertices[0]);
     const [bx, by] = mmToPx(...vertices[1]);
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
-    if (cableEdgeConfirmed) {
-      ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 3.5; ctx.stroke();
-    } else {
-      // Not chosen yet: show where the default WOULD land, clearly tentative.
-      ctx.save();
-      ctx.strokeStyle = "#8a7040"; ctx.lineWidth = 2.5; ctx.setLineDash([5, 5]);
-      ctx.stroke();
-      ctx.restore();
-    }
+    ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 3.5; ctx.stroke();
   }
 
   // Shared edges retained by the unfolding tree. These are bend/fold guides,
@@ -389,7 +384,8 @@ function drawOutlinePolygon() {
     const [px, py] = mmToPx(mx, my);
     ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
     const isSelected = editTarget === "outline" && selected?.type === "vertex" && selected.index === i;
-    ctx.fillStyle = isSelected ? "#ffd45a" : (i < 2 ? "#ffb84d" : "#4f9dff");
+    ctx.fillStyle = isSelected ? "#ffd45a"
+      : (cableEdgeConfirmed && i < 2 ? "#ffb84d" : "#4f9dff");
     ctx.fill();
   });
 }
@@ -1188,6 +1184,28 @@ for (const el of [...gridModeInputs, ...boardModeInputs]) {
   el.addEventListener("change", syncGridMode);
 }
 syncGridMode();
+
+// Pitch can never be smaller than the pixel — cells would overlap. Whenever
+// either side of a pair changes, drag the pitch up to at least the pixel
+// size ("change", not "input", so typing "2.5" isn't clamped mid-keystroke).
+const pitchFloorPairs = [["pixel_w_mm", "pitch_x_mm"], ["pixel_h_mm", "pitch_y_mm"]];
+function enforcePitchFloor() {
+  for (const [pxId, pitchId] of pitchFloorPairs) {
+    const px = parseFloat(document.getElementById(pxId)?.value);
+    const pitchEl = document.getElementById(pitchId);
+    if (!pitchEl || !Number.isFinite(px)) continue;
+    const pitch = parseFloat(pitchEl.value);
+    if (!Number.isFinite(pitch) || pitch < px) {
+      pitchEl.value = String(px);
+    }
+    pitchEl.min = String(px);
+  }
+}
+for (const [pxId, pitchId] of pitchFloorPairs) {
+  document.getElementById(pxId)?.addEventListener("change", enforcePitchFloor);
+  document.getElementById(pitchId)?.addEventListener("change", enforcePitchFloor);
+}
+enforcePitchFloor();
 // Everything below is expansion-only shaping: in fixed-outline mode the drawn
 // outline is the board, so these are forced off exactly as they were when
 // auto-expand was a checkbox the user could clear.
@@ -1268,6 +1286,9 @@ function readParams() {
       p[id] = Number.isFinite(parsed) ? parsed : 0;
     }
   }
+  // Final guard for the pitch >= pixel rule (the inputs already clamp).
+  p.pitch_x_mm = Math.max(p.pitch_x_mm, p.pixel_w_mm);
+  p.pitch_y_mm = Math.max(p.pitch_y_mm, p.pixel_h_mm);
   p.board_mode = selectedBoardMode();
   p.router = document.getElementById("hug_router").checked ? "hug" : "legacy";
   // In rows/cols mode the backend solves pixel size and pitch from the outline,
