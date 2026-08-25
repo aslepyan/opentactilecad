@@ -176,10 +176,14 @@
             <button id="select-single" type="button" class="mode-button active" disabled>Single face</button>
             <button id="select-multiple" type="button" class="mode-button" disabled>Multiple faces</button>
             <button id="select-curved" type="button" class="mode-button" disabled>Curved surface</button>
+            <button id="select-patch" type="button" class="mode-button" disabled
+              title="Draw your sensor's boundary directly on the 3D surface: click corner points, close the loop, and the enclosed patch is selected — bumps and texture inside are smoothed out.">Draw patch</button>
             <button id="select-all-faces" type="button" class="secondary" disabled>Select all</button>
             <button id="unfold-faces" type="button" class="primary" disabled>Unfold selection</button>
             <button id="clear-face" type="button" class="secondary" disabled>Clear selection</button>
             <button id="reset-view" type="button" class="secondary" disabled>Reset view</button>
+            <button id="capture-example" type="button" class="secondary" hidden
+              title="Dev (localhost only): save the current selection + unfold as an example-gallery annotation JSON">Save as example</button>
             <input id="stl-input" type="file" accept=".stl,model/stl,application/sla" hidden />
           </div>
           <div class="stl-curved-controls">
@@ -187,6 +191,14 @@
             <label>Max growth radius <input id="curved-max-radius" type="number" min="0" step="1" placeholder="auto" disabled /></label>
             <label class="check-field"><input id="auto-seam" type="checkbox" checked disabled /> Auto seam</label>
             <button id="set-seam" type="button" class="secondary" disabled>Set seam</button>
+          </div>
+          <div class="stl-patch-controls" id="stl-patch-controls" hidden>
+            <span class="hint" id="patch-hint">Click points on the surface to outline your sensor; click the first point again to close the loop. Click the last point to undo it.</span>
+            <label class="check-field" title="Relax the surface inside your outline before flattening, so tread patterns, ribs, and other texture don't distort the sensor's shape — the outline you drew keeps its true dimensions.">
+              <input id="patch-smooth" type="checkbox" checked /> Smooth out texture
+            </label>
+            <button id="patch-flip" type="button" class="secondary" disabled
+              title="The loop cuts the model in two — swap which side is the sensor patch.">Flip side</button>
           </div>
           <div id="stl-container" class="stl-container stl-container--sidebar">
             <p class="placeholder">Upload an <code>.stl</code> file to view it in 3D.</p>

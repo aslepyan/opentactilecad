@@ -110,8 +110,27 @@ export function buildSurfaceModel(geometry, angleTolDeg = DEFAULT_ANGLE_TOL_DEG)
   }
 
   // Preserve degenerate triangles as isolated, non-selectable entries in mapping.
-  const regions = regionTriangles.map((triangles, id) =>
-    buildRegion(id, triangles, triVerts, triNormals, vertices, pos));
+  // A region whose boundary can't be chained into closed loops (duplicate
+  // faces, T-junctions — common in meshes converted from DAE/OBJ or scene
+  // dumps) must NOT abort the whole model: it becomes an inert stub the
+  // selection code refuses with a pointer to Curved-surface mode, which works
+  // from triangle adjacency alone and doesn't need the region's boundary.
+  // (Before this, one bad region out of thousands failed the entire upload —
+  // 15 of 42 real end-effector meshes.)
+  const regions = regionTriangles.map((triangles, id) => {
+    try {
+      return buildRegion(id, triangles, triVerts, triNormals, vertices, pos);
+    } catch (err) {
+      return {
+        id,
+        triangles,
+        degenerate: true,
+        error: String(err?.message || err),
+        area: 0,
+        normal: triNormals[triangles[0]].clone(),
+      };
+    }
+  });
 
   // Region adjacency. Every shared edge between two planar regions is a possible
   // unfolding hinge. Non-manifold edges are supported pairwise but flagged.
@@ -468,6 +487,10 @@ export function unfoldSelectedRegions(model, selectedRegionIds, rootRegionId = n
   for (const id of selected) {
     if (!Number.isInteger(id) || id < 0 || id >= model.regions.length) {
       throw new Error("The selection contains an unknown face.");
+    }
+    if (model.regions[id].degenerate) {
+      throw new Error(
+        `Face ${id + 1}'s boundary couldn't be analyzed — use Curved surface mode for that area.`);
     }
   }
 
@@ -1464,4 +1487,174 @@ function distance2(a, b) {
   const dx = a[0] - b[0];
   const dy = a[1] - b[1];
   return dx * dx + dy * dy;
+}
+
+// --- Draw-a-patch-on-the-surface support ------------------------------------
+// The "Draw patch" mode lets the user click points directly on the 3D surface;
+// consecutive points are joined by the shortest path along the mesh, the
+// closed loop splits the mesh in two, and the enclosed side becomes the
+// selection — unfolded by the normal machinery, optionally after Laplacian
+// smoothing so surface texture (tread bumps, ribs) doesn't distort the
+// flattened outline. Boundary vertices are pinned during smoothing, so the
+// drawn outline's true dimensions are preserved.
+
+function vertexAdjacency(model) {
+  // Cached on the model: vertexId -> [{v, length}] over unique mesh edges.
+  if (model._vertexAdj) return model._vertexAdj;
+  const adj = new Map();
+  const seen = new Set();
+  for (const ids of model.triVerts) {
+    for (const [a, b] of triangleEdges(ids)) {
+      const key = edgeKey(a, b);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const length = model.vertices[a].distanceTo(model.vertices[b]);
+      if (!adj.has(a)) adj.set(a, []);
+      if (!adj.has(b)) adj.set(b, []);
+      adj.get(a).push({ v: b, length });
+      adj.get(b).push({ v: a, length });
+    }
+  }
+  model._vertexAdj = adj;
+  return adj;
+}
+
+export function shortestSurfacePath(model, startVertex, endVertex) {
+  // Dijkstra over the mesh's vertex graph, weighted by true edge length.
+  // Returns the vertex-id path INCLUDING both endpoints.
+  if (startVertex === endVertex) return [startVertex];
+  const adj = vertexAdjacency(model);
+  const dist = new Map([[startVertex, 0]]);
+  const prev = new Map();
+  const visited = new Set();
+  // Simple binary-heap-free frontier: fine at mesh sizes this app handles.
+  const frontier = new Map([[startVertex, 0]]);
+  while (frontier.size) {
+    let current = null, best = Infinity;
+    for (const [v, d] of frontier) if (d < best) { best = d; current = v; }
+    frontier.delete(current);
+    if (current === endVertex) break;
+    visited.add(current);
+    for (const { v, length } of adj.get(current) || []) {
+      if (visited.has(v)) continue;
+      const next = best + length;
+      if (next < (dist.get(v) ?? Infinity)) {
+        dist.set(v, next);
+        prev.set(v, current);
+        frontier.set(v, next);
+      }
+    }
+  }
+  if (!prev.has(endVertex)) throw new Error("No surface path between those points.");
+  const path = [endVertex];
+  while (path[path.length - 1] !== startVertex) path.push(prev.get(path[path.length - 1]));
+  return path.reverse();
+}
+
+export function splitByLoop(model, loopVertexPath) {
+  // loopVertexPath: closed vertex cycle (first == last is optional). Blocks its
+  // edges and flood-fills triangles across every other shared edge; returns the
+  // resulting components sorted smallest-area first. Two components = a clean
+  // cut; one = the loop didn't separate the surface (degenerate drawing).
+  const cycle = loopVertexPath.slice();
+  if (cycle[0] !== cycle[cycle.length - 1]) cycle.push(cycle[0]);
+  const blocked = new Set();
+  for (let i = 0; i + 1 < cycle.length; i++) blocked.add(edgeKey(cycle[i], cycle[i + 1]));
+
+  const assigned = new Int32Array(model.triVerts.length).fill(-1);
+  const components = [];
+  for (let seed = 0; seed < model.triVerts.length; seed++) {
+    if (assigned[seed] !== -1) continue;
+    const id = components.length;
+    const triangles = new Set([seed]);
+    assigned[seed] = id;
+    const stack = [seed];
+    while (stack.length) {
+      const t = stack.pop();
+      for (const adjacency of model.triAdjacency[t] || []) {
+        const n = adjacency.triangle;
+        if (assigned[n] !== -1) continue;
+        if (blocked.has(edgeKey(adjacency.va, adjacency.vb))) continue;
+        assigned[n] = id;
+        triangles.add(n);
+        stack.push(n);
+      }
+    }
+    let area = 0;
+    for (const t of triangles) area += model.triAreas[t];
+    components.push({ triangles, area });
+  }
+  components.sort((a, b) => a.area - b.area);
+  return components;
+}
+
+export function smoothedPatchModel(model, triangleIds, iterations = 12, lambda = 0.5) {
+  // Shallow model copy whose patch-interior vertices are Laplacian-relaxed
+  // (uniform weights, patch-internal neighbors only). Pinned: every vertex on
+  // the patch's own boundary or shared with a non-patch triangle — so the
+  // drawn outline keeps its true measured dimensions while bumps inside are
+  // flattened out. Normals/areas are recomputed for patch triangles, which is
+  // all the unfold reads.
+  const patch = new Set([...triangleIds].map(Number));
+  const patchVertices = new Set();
+  const edgeUse = new Map();
+  for (const t of patch) {
+    for (const v of model.triVerts[t]) patchVertices.add(v);
+    for (const [a, b] of triangleEdges(model.triVerts[t])) {
+      const key = edgeKey(a, b);
+      edgeUse.set(key, (edgeUse.get(key) || 0) + 1);
+    }
+  }
+  const pinned = new Set();
+  for (const [key, count] of edgeUse) {
+    if (count === 1) {
+      const [a, b] = key.split("_").map(Number);
+      pinned.add(a); pinned.add(b);
+    }
+  }
+  for (let t = 0; t < model.triVerts.length; t++) {
+    if (patch.has(t)) continue;
+    for (const v of model.triVerts[t]) if (patchVertices.has(v)) pinned.add(v);
+  }
+  // Patch-internal neighbor lists for the free vertices.
+  const neighbors = new Map();
+  for (const [key, count] of edgeUse) {
+    const [a, b] = key.split("_").map(Number);
+    if (!neighbors.has(a)) neighbors.set(a, []);
+    if (!neighbors.has(b)) neighbors.set(b, []);
+    neighbors.get(a).push(b);
+    neighbors.get(b).push(a);
+  }
+  const positions = new Map();
+  for (const v of patchVertices) positions.set(v, model.vertices[v].clone());
+  for (let it = 0; it < iterations; it++) {
+    const updates = [];
+    for (const v of patchVertices) {
+      if (pinned.has(v)) continue;
+      const nbrs = neighbors.get(v) || [];
+      if (!nbrs.length) continue;
+      const mean = new THREE.Vector3();
+      for (const n of nbrs) mean.add(positions.get(n));
+      mean.multiplyScalar(1 / nbrs.length);
+      const p = positions.get(v);
+      updates.push([v, p.clone().lerp(mean, lambda)]);
+    }
+    for (const [v, p] of updates) positions.set(v, p);
+  }
+  const vertices = model.vertices.slice();
+  for (const [v, p] of positions) vertices[v] = p;
+  const triNormals = model.triNormals.slice();
+  const triAreas = model.triAreas.slice();
+  for (const t of patch) {
+    const [a, b, c] = model.triVerts[t];
+    const ab = vertices[b].clone().sub(vertices[a]);
+    const ac = vertices[c].clone().sub(vertices[a]);
+    const cross = new THREE.Vector3().crossVectors(ab, ac);
+    const doubled = cross.length();
+    triAreas[t] = doubled / 2;
+    triNormals[t] = doubled > 1e-12 ? cross.multiplyScalar(1 / doubled) : model.triNormals[t].clone();
+  }
+  const copy = { ...model, vertices, triNormals, triAreas };
+  delete copy._vertexAdj;
+  return copy;
 }

@@ -6,6 +6,9 @@ import {
   buildSurfaceModel,
   finalizeChainOutline,
   selectSmoothTrianglePatch,
+  shortestSurfacePath,
+  smoothedPatchModel,
+  splitByLoop,
   unfoldSelectedRegions,
   unfoldSelectedTriangles,
 } from "./face-select.js";
@@ -26,6 +29,10 @@ const autoSeamInput = document.getElementById("auto-seam");
 const setSeamBtn = document.getElementById("set-seam");
 const selectAllBtn = document.getElementById("select-all-faces");
 const unfoldBtn = document.getElementById("unfold-faces");
+const patchBtn = document.getElementById("select-patch");
+const patchControlsEl = document.getElementById("stl-patch-controls");
+const patchSmoothInput = document.getElementById("patch-smooth");
+const patchFlipBtn = document.getElementById("patch-flip");
 const connectionsEl = document.getElementById("stl-connections");
 
 let scene, camera, renderer, controls, mesh, highlightMesh;
@@ -285,6 +292,11 @@ function selectFaceAt(clientX, clientY) {
     return;
   }
 
+  if (selectionMode === "patch") {
+    handlePatchClick(hits[0]);
+    return;
+  }
+
   if (selectionMode === "curved") {
     try {
       const tolerance = Number.parseFloat(curvatureTolInput?.value) || 18;
@@ -314,6 +326,17 @@ function selectFaceAt(clientX, clientY) {
     } catch (error) {
       showError(error.message);
     }
+    return;
+  }
+
+  // Regions whose boundary couldn't be analyzed (duplicate faces/T-junctions
+  // in the mesh) are inert stubs — planar selection needs the boundary, but
+  // Curved-surface mode works from triangle adjacency and still handles them.
+  if (selectionMode !== "curved" && surfaceModel.regions[regionId].degenerate) {
+    showError(
+      "This surface's outline couldn't be analyzed (messy tessellation in the file). " +
+      'Switch to "Curved surface" mode, which doesn\'t need it.',
+    );
     return;
   }
 
@@ -367,6 +390,149 @@ function selectFaceAt(clientX, clientY) {
   showCombinedSelectionStatus(unfoldHint());
 }
 
+// --- Draw-patch mode: outline the sensor directly on the 3D surface --------
+// Clicks snap to mesh vertices; consecutive points are joined by the shortest
+// path along the surface; closing the loop splits the mesh and the smaller
+// side becomes the selection (Flip side swaps it). The normal unfold runs on
+// a texture-smoothed copy of the patch when "Smooth out texture" is checked.
+let patchState = null;
+
+function clearPatchState() {
+  if (patchState?.overlay) {
+    scene.remove(patchState.overlay);
+    patchState.overlay.traverse((obj) => {
+      obj.geometry?.dispose?.();
+      obj.material?.dispose?.();
+    });
+  }
+  patchState = null;
+  if (patchFlipBtn) patchFlipBtn.disabled = true;
+}
+
+function patchLoopVertices() {
+  // Full vertex cycle: concatenation of the per-segment surface paths
+  // (each path includes both endpoints; drop the duplicated joints).
+  const cycle = [];
+  for (const path of patchState.paths) {
+    for (let i = cycle.length ? 1 : 0; i < path.length; i++) cycle.push(path[i]);
+  }
+  return cycle;
+}
+
+function renderPatchOverlay() {
+  if (patchState?.overlay) {
+    scene.remove(patchState.overlay);
+  }
+  if (!patchState) return;
+  const group = new THREE.Group();
+  const r = Math.max(modelRadius * 0.022, 0.3);
+  patchState.points.forEach((vertexId, i) => {
+    const geom = new THREE.SphereGeometry(i === 0 ? r * 1.5 : r, 12, 12);
+    const mat = new THREE.MeshBasicMaterial({ color: i === 0 ? 0xffd45a : 0xff5d8f, depthTest: false });
+    const sphere = new THREE.Mesh(geom, mat);
+    sphere.position.copy(surfaceModel.vertices[vertexId]);
+    sphere.renderOrder = 3;
+    group.add(sphere);
+  });
+  for (const path of patchState.paths) {
+    const pts = path.map((vertexId) => surfaceModel.vertices[vertexId].clone());
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: 0xffd45a, depthTest: false }));
+    line.renderOrder = 2;
+    group.add(line);
+  }
+  scene.add(group);
+  patchState.overlay = group;
+}
+
+function applyPatchSide() {
+  const component = patchState.components[patchState.sideIndex];
+  selectedTriangles = new Set(component.triangles);
+  selectedRegions = new Set();
+  rootTriangleId = component.triangles.values().next().value;
+  curvedSelectionMeta = null;
+  manualSeamTriangles = [];
+  clickOrder = [{ faceIndex: rootTriangleId, regionId: null, triangles: new Set(component.triangles) }];
+  invalidateChain();
+  refreshHighlight();
+  const sides = patchState.components.length;
+  infoEl.textContent =
+    `${loadedName} · patch enclosed: ${component.triangles.size.toLocaleString()} triangles · ` +
+    `${component.area.toFixed(1)} mm² (side ${patchState.sideIndex + 1} of ${sides}) · ` +
+    `press Unfold selection — or Flip side if the highlight is on the wrong side.`;
+  if (patchFlipBtn) patchFlipBtn.disabled = sides < 2;
+}
+
+function handlePatchClick(hit) {
+  if (!patchState) patchState = { points: [], paths: [], closed: false, components: [], sideIndex: 0, overlay: null };
+  if (patchState.closed) {
+    showError("The loop is closed — press Unfold selection, Flip side, or Clear selection to start over.");
+    return;
+  }
+  const ids = surfaceModel.triVerts[hit.faceIndex];
+  let vertexId = ids[0];
+  let best = Infinity;
+  for (const candidate of ids) {
+    const d = surfaceModel.vertices[candidate].distanceTo(hit.point);
+    if (d < best) { best = d; vertexId = candidate; }
+  }
+  const { points, paths } = patchState;
+  const snap = Math.max(modelRadius * 0.03, 0.4);
+  if (points.length && (vertexId === points[points.length - 1] ||
+      surfaceModel.vertices[points[points.length - 1]].distanceTo(surfaceModel.vertices[vertexId]) < snap * 0.5)) {
+    // Clicking the last point again = undo it.
+    points.pop();
+    paths.pop();
+    renderPatchOverlay();
+    infoEl.textContent = `${loadedName} · point removed · ${points.length} patch point${points.length === 1 ? "" : "s"}.`;
+    return;
+  }
+  const closing = points.length >= 3 &&
+    (vertexId === points[0] || surfaceModel.vertices[points[0]].distanceTo(surfaceModel.vertices[vertexId]) < snap);
+  try {
+    const target = closing ? points[0] : vertexId;
+    if (points.length) {
+      paths.push(shortestSurfacePath(surfaceModel, points[points.length - 1], target));
+    }
+    if (closing) {
+      const cycle = patchLoopVertices();
+      const interior = cycle.slice(1);
+      if (new Set(interior).size !== interior.length) {
+        paths.pop();
+        showError("The loop crosses itself on the surface — undo some points and keep segments shorter.");
+        return;
+      }
+      patchState.closed = true;
+      patchState.components = splitByLoop(surfaceModel, cycle);
+      renderPatchOverlay();
+      if (patchState.components.length < 2) {
+        patchState.closed = false;
+        patchState.components = [];
+        paths.pop();
+        renderPatchOverlay();
+        showError("That loop doesn't enclose a patch (it may run along an open mesh border) — try different points.");
+        return;
+      }
+      patchState.sideIndex = 0;
+      applyPatchSide();
+      return;
+    }
+    points.push(vertexId);
+    renderPatchOverlay();
+    infoEl.textContent =
+      `${loadedName} · ${points.length} patch point${points.length === 1 ? "" : "s"}` +
+      (points.length >= 3 ? " · click the first (yellow) point to close the loop." : " · keep clicking around your sensor area.");
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+patchFlipBtn?.addEventListener("click", () => {
+  if (!patchState?.closed || patchState.components.length < 2) return;
+  patchState.sideIndex = (patchState.sideIndex + 1) % patchState.components.length;
+  applyPatchSide();
+});
+
 function unfoldCurrentSelection() {
   if (!surfaceModel || (!selectedRegions.size && !selectedTriangles.size)) return;
   const combinedTriangles = combinedSelectedTriangles();
@@ -380,12 +546,22 @@ function unfoldCurrentSelection() {
 
   let result;
   try {
-    result = selectedTriangles.size
-      ? unfoldSelectedTriangles(surfaceModel, combinedTriangles, rootTriangleId ?? combinedTriangles.values().next().value, {
-          autoSeam: autoSeamInput?.checked !== false,
-          seamTriangleIds: manualSeamTriangles,
-        })
-      : unfoldSelectedRegions(surfaceModel, selectedRegions, rootRegionId);
+    if (selectedTriangles.size) {
+      // Draw-patch selections optionally unfold a texture-smoothed copy of
+      // the model: interior bumps relax away while the drawn boundary stays
+      // pinned at its true dimensions. A drawn patch is a disc cut by its own
+      // loop, so the tube/cone auto-seam heuristic is unnecessary there.
+      const drawnPatch = selectionMode === "patch" && patchState?.closed;
+      const model = drawnPatch && patchSmoothInput?.checked
+        ? smoothedPatchModel(surfaceModel, combinedTriangles)
+        : surfaceModel;
+      result = unfoldSelectedTriangles(model, combinedTriangles, rootTriangleId ?? combinedTriangles.values().next().value, {
+        autoSeam: drawnPatch ? false : autoSeamInput?.checked !== false,
+        seamTriangleIds: manualSeamTriangles,
+      });
+    } else {
+      result = unfoldSelectedRegions(surfaceModel, selectedRegions, rootRegionId);
+    }
   } catch (error) {
     showError(error.message);
     return;
@@ -889,6 +1065,7 @@ function clearSelection(notify = true) {
   seamPickMode = false;
   manualSeamTriangles = [];
   clickOrder = [];
+  clearPatchState();
   invalidateChain();
   setSeamBtn?.classList.remove("active");
   clearHighlight();
@@ -938,11 +1115,19 @@ function setMode(mode) {
   singleBtn.classList.toggle("active", mode === "single");
   multipleBtn.classList.toggle("active", mode === "multiple");
   curvedBtn.classList.toggle("active", mode === "curved");
+  patchBtn?.classList.toggle("active", mode === "patch");
   singleBtn.setAttribute("aria-pressed", String(mode === "single"));
   multipleBtn.setAttribute("aria-pressed", String(mode === "multiple"));
   curvedBtn.setAttribute("aria-pressed", String(mode === "curved"));
+  patchBtn?.setAttribute("aria-pressed", String(mode === "patch"));
+  if (patchControlsEl) patchControlsEl.hidden = mode !== "patch";
+  if (mode !== "patch") clearPatchState();
   if (surfaceModel) {
-    if (mode === "curved") {
+    if (mode === "patch") {
+      infoEl.textContent =
+        `${loadedName} · Draw patch: click points on the surface to outline your sensor; ` +
+        `click the first point again to close the loop.`;
+    } else if (mode === "curved") {
       showCombinedSelectionStatus("click one triangle on a curved surface");
     } else if (selectedRegions.size || selectedTriangles.size) {
       showCombinedSelectionStatus(mode === "single" ? "click one face to replace selection" : "click faces to toggle selection");
@@ -957,6 +1142,7 @@ function setSelectionControlsEnabled(enabled) {
   singleBtn.disabled = !enabled;
   multipleBtn.disabled = !enabled;
   curvedBtn.disabled = !enabled;
+  if (patchBtn) patchBtn.disabled = !enabled;
   selectAllBtn.disabled = !enabled;
   if (curvatureTolInput) curvatureTolInput.disabled = !enabled;
   if (maxGrowthInput) maxGrowthInput.disabled = !enabled;
@@ -985,6 +1171,7 @@ fileInput.addEventListener("change", (event) => {
 singleBtn.addEventListener("click", () => setMode("single"));
 multipleBtn.addEventListener("click", () => setMode("multiple"));
 curvedBtn.addEventListener("click", () => setMode("curved"));
+patchBtn?.addEventListener("click", () => setMode("patch"));
 
 setSeamBtn?.addEventListener("click", () => {
   if (!surfaceModel) return;
@@ -1000,7 +1187,10 @@ setSeamBtn?.addEventListener("click", () => {
 
 selectAllBtn.addEventListener("click", () => {
   if (!surfaceModel) return;
-  selectedRegions = new Set(surfaceModel.regions.map((region) => region.id));
+  // Skip inert stub regions (boundary analysis failed) — they can't unfold
+  // and have no highlight geometry.
+  const usable = surfaceModel.regions.filter((region) => !region.degenerate);
+  selectedRegions = new Set(usable.map((region) => region.id));
   selectedTriangles = new Set();
   rootTriangleId = null;
   curvedSelectionMeta = null;
@@ -1008,7 +1198,7 @@ selectAllBtn.addEventListener("click", () => {
   seamPickMode = false;
   // Largest-area first, so a disconnected model chains its biggest shell
   // outward instead of starting from a sliver.
-  clickOrder = [...surfaceModel.regions]
+  clickOrder = [...usable]
     .sort((a, b) => b.area - a.area)
     .map((region) => ({
       faceIndex: region.triangles[0],
@@ -1075,3 +1265,58 @@ setSelectionControlsEnabled(false);
 window.addEventListener("otc:view-shown", () => {
   if (initialized) onResize();
 });
+
+// --- DEV ONLY: example-gallery annotation capture (localhost) ---------------
+// Curating STL examples of real end effectors: after selecting surfaces and
+// unfolding, "Save as example" posts the full selection state + resulting
+// outline to /dev/capture-example, which writes JSON under
+// stl_examples/end_effectors/annotations/. The gallery replay consumes these.
+// The button only appears when the page is served by the local backend.
+let lastOutlineDetail = null;
+window.addEventListener("otc:face-outline", (e) => { lastOutlineDetail = e.detail; });
+const captureBtn = document.getElementById("capture-example");
+if (captureBtn && API_BASE === "") {
+  captureBtn.hidden = false;
+  captureBtn.addEventListener("click", async () => {
+    if (!loadedName) { showError("Load an STL first."); return; }
+    const suggested = loadedName.replace(/\.stl$/i, "").replace(/[^A-Za-z0-9-_]+/g, "_");
+    const name = window.prompt("Annotation name:", suggested);
+    if (!name) return;
+    const payload = {
+      stl_name: loadedName,
+      selection_mode: selectionMode,
+      curvature_tolerance_deg: Number.parseFloat(curvatureTolInput?.value) || 18,
+      max_growth_radius_mm: Number.parseFloat(maxGrowthInput?.value) || null,
+      auto_seam: autoSeamInput?.checked !== false,
+      click_order: clickOrder.map((entry) => ({
+        faceIndex: entry.faceIndex,
+        regionId: entry.regionId,
+        triangles: [...entry.triangles],
+      })),
+      manual_seam_triangles: [...manualSeamTriangles],
+      chain_overrides: chainOverrides,
+      // Draw-patch annotations: the drawn loop (clicked mesh vertex ids +
+      // full surface cycle) and whether texture smoothing was applied.
+      patch_points: patchState?.closed ? [...patchState.points] : null,
+      patch_loop_vertices: patchState?.closed ? patchLoopVertices() : null,
+      patch_side_index: patchState?.closed ? patchState.sideIndex : null,
+      patch_smooth: patchState?.closed ? patchSmoothInput?.checked !== false : null,
+      outline: lastOutlineDetail ? lastOutlineDetail.outline : null,
+      fold_lines: lastOutlineDetail ? (lastOutlineDetail.foldLines || []) : [],
+      unfold_size_mm: lastOutlineDetail ? [lastOutlineDetail.w, lastOutlineDetail.h] : null,
+      captured_at: new Date().toISOString(),
+    };
+    try {
+      const resp = await fetch(`${API_BASE}/dev/capture-example`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, payload }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      infoEl.textContent = `Saved example annotation → ${data.saved}`;
+    } catch (err) {
+      showError(`Capture failed: ${err.message}`);
+    }
+  });
+}

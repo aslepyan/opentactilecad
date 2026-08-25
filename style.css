@@ -486,6 +486,22 @@ button.mode-button.active {
   width: auto;
   padding: 0;
 }
+.stl-patch-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.stl-patch-controls[hidden] { display: none; }
+.stl-patch-controls .hint { flex: 1 1 100%; margin: 0; }
+.stl-patch-controls .check-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
 
 .connector-upsize {
   display: flex;
