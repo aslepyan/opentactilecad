@@ -450,6 +450,11 @@ function orderedClickEntries() {
   return entries.reverse();
 }
 
+// Two-stage flow, matching the original stl_viewer.js design: Unfold
+// computes the joined chain and shows a PREVIEW (small 2D outline + one row
+// per straight cut with corner picking) — nothing touches the board editor
+// yet, so picking corners never trips the editor's overwrite confirmation.
+// "Use this shape" hands the current outline off exactly once.
 async function unfoldViaBackendChain() {
   if (chainBusy) return;
   if (!stlBuffer) {
@@ -480,29 +485,12 @@ async function unfoldViaBackendChain() {
       } catch {}
       throw new Error(detail);
     }
-    const data = await response.json();
-    chainData = data;
-
-    const finalized = finalizeChainOutline(data.outline);
-    window.dispatchEvent(new CustomEvent("otc:face-outline", {
-      detail: {
-        outline: finalized.outline,
-        foldLines: [],
-        w: finalized.w,
-        h: finalized.h,
-        faceCount: entries.length,
-        warnings: data.warnings || [],
-      },
-    }));
-
-    const strutCount = data.connections.filter((c) => c.needs_strut).length;
-    const worstDev = Math.max(0, ...(data.region_developability_mm || []));
-    const devNote = worstDev > 1.0 ? ` · surface distortion up to ${worstDev.toFixed(1)}mm — check warnings` : "";
+    chainData = await response.json();
+    chainData.entryCount = entries.length;
+    renderChainPanel();
     infoEl.textContent =
       `${loadedName} · joined ${entries.length} surfaces · ` +
-      `${finalized.w.toFixed(1)} × ${finalized.h.toFixed(1)} mm · ` +
-      `${strutCount} straight cut${strutCount === 1 ? "" : "s"}${devNote}`;
-    renderConnectionRows();
+      `review the cuts below, pick corners where needed, then "Use this shape".`;
   } catch (error) {
     showError(error.message);
   } finally {
@@ -511,28 +499,113 @@ async function unfoldViaBackendChain() {
   }
 }
 
-function renderConnectionRows() {
+function useChainShape() {
+  if (!chainData) return;
+  let finalized;
+  try {
+    finalized = finalizeChainOutline(chainData.outline);
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  window.dispatchEvent(new CustomEvent("otc:face-outline", {
+    detail: {
+      outline: finalized.outline,
+      foldLines: [],
+      w: finalized.w,
+      h: finalized.h,
+      faceCount: chainData.entryCount || 2,
+      warnings: chainData.warnings || [],
+    },
+  }));
+  infoEl.textContent =
+    `${loadedName} · outline loaded into the editor · ` +
+    `${finalized.w.toFixed(1)} × ${finalized.h.toFixed(1)} mm`;
+}
+
+function drawChainPreview(canvas, points) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!points || points.length < 3) return;
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const pad = 10;
+  const scale = Math.min((w - 2 * pad) / Math.max(maxX - minX, 1e-6),
+                         (h - 2 * pad) / Math.max(maxY - minY, 1e-6));
+  const ox = (w - (maxX - minX) * scale) / 2;
+  const oy = (h - (maxY - minY) * scale) / 2;
+  // y flipped: outline is y-up, canvas is y-down
+  const px = (p) => [ox + (p[0] - minX) * scale, h - oy - (p[1] - minY) * scale];
+  ctx.beginPath();
+  const [x0, y0] = px(points[0]);
+  ctx.moveTo(x0, y0);
+  for (const p of points.slice(1)) ctx.lineTo(...px(p));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(60, 130, 90, 0.35)";
+  ctx.strokeStyle = "#7fe0a8";
+  ctx.lineWidth = 1.5;
+  ctx.fill();
+  ctx.stroke();
+  // Mark the cable edge (0->1 after finalization) so the exit side is visible.
+  ctx.beginPath();
+  ctx.moveTo(...px(points[0]));
+  ctx.lineTo(...px(points[1]));
+  ctx.strokeStyle = "#ffd23e";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function renderChainPanel() {
   if (!connectionsEl) return;
   connectionsEl.innerHTML = "";
-  const struts = (chainData?.connections || [])
-    .map((connection, index) => ({ connection, index }))
-    .filter((item) => item.connection.needs_strut);
-  if (!struts.length) {
+  if (!chainData) {
     connectionsEl.hidden = true;
     return;
   }
-  for (const { connection, index } of struts) {
+
+  let finalized = null;
+  try {
+    finalized = finalizeChainOutline(chainData.outline);
+  } catch {}
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "chain-preview";
+  canvas.width = 260;
+  canvas.height = 150;
+  connectionsEl.appendChild(canvas);
+  if (finalized) drawChainPreview(canvas, finalized.outline);
+
+  const dims = document.createElement("div");
+  dims.className = "chain-dims";
+  const strutCount = chainData.connections.filter((c) => c.needs_strut).length;
+  const worstDev = Math.max(0, ...(chainData.region_developability_mm || []));
+  dims.textContent = (finalized
+    ? `${finalized.w.toFixed(1)} × ${finalized.h.toFixed(1)} mm · yellow = cable edge`
+    : "could not build a preview outline")
+    + ` · ${strutCount} straight cut${strutCount === 1 ? "" : "s"}`
+    + (worstDev > 1.0 ? ` · distortion up to ${worstDev.toFixed(1)}mm` : "");
+  connectionsEl.appendChild(dims);
+
+  for (const [index, connection] of chainData.connections.entries()) {
+    if (!connection.needs_strut) continue;
     const row = document.createElement("div");
     row.className = "conn-row warn";
     const label = document.createElement("span");
     const kind = chainOverrides[index] ? "your corners" : "auto corners";
     label.innerHTML =
       `Cut ${index + 1}&harr;${index + 2}: <span class="conn-kind">straight cut, ${kind}</span>`;
-    const fix = document.createElement("button");
-    fix.type = "button";
-    fix.className = "secondary";
-    fix.textContent = cornerPick?.connIndex === index ? "Cancel" : "Fix corners";
-    fix.addEventListener("click", () => {
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "secondary";
+    pick.disabled = chainBusy;
+    pick.textContent = cornerPick?.connIndex === index ? "Cancel" : "Pick corners";
+    pick.addEventListener("click", () => {
       if (cornerPick?.connIndex === index) {
         endCornerPick("corner picking cancelled");
       } else {
@@ -540,9 +613,21 @@ function renderConnectionRows() {
       }
     });
     row.appendChild(label);
-    row.appendChild(fix);
+    row.appendChild(pick);
     connectionsEl.appendChild(row);
   }
+
+  const actions = document.createElement("div");
+  actions.className = "chain-actions";
+  const use = document.createElement("button");
+  use.type = "button";
+  use.className = "primary";
+  use.textContent = "Use this shape";
+  use.disabled = chainBusy || !finalized;
+  use.addEventListener("click", useChainShape);
+  actions.appendChild(use);
+  connectionsEl.appendChild(actions);
+
   connectionsEl.hidden = false;
 }
 
@@ -572,7 +657,7 @@ function startCornerPick(connIndex, connection) {
   scene.add(markerGroup);
   scene.add(previewGroup);
   cornerPick = { connIndex, pairs: [], pendingA: null, markerGroup, previewGroup };
-  renderConnectionRows();
+  renderChainPanel();
   infoEl.textContent =
     "Pick corner pair 1 of 2: click a marker on the existing chain (colored), then its partner on the new surface (pink).";
 }
@@ -588,7 +673,7 @@ function endCornerPick(message = "") {
       });
     }
     cornerPick = null;
-    renderConnectionRows();
+    renderChainPanel();
   }
   if (message) infoEl.textContent = `${loadedName} · ${message}`;
 }
