@@ -311,7 +311,47 @@ export function unfoldSelectedTriangles(model, selectedTriangleIds, rootTriangle
     warnings.push("High accumulated curvature may cause flattening distortion.");
   }
 
-  const outline = buildTrianglePatchBoundary(placedFaces, model.weldEps * 20, seam.edges);
+  let outline;
+  if (!seam.edges.size) {
+    // Simple, robust outline for the common case (no seam cut): the
+    // selection's boundary loops in VERTEX space always close — every
+    // boundary edge belongs to exactly one selected triangle — so take
+    // the largest loop, map each vertex to its unfolded 2D position, and
+    // simply disregard every smaller loop (screw holes, vents). This
+    // replaces re-deriving the boundary from unfolded 2D edge soup,
+    // which broke three separate ways on a holed pad (hole-rim seams,
+    // hinge drift outrunning the snap tolerance, rims fragmented at
+    // branch meetings) — all fights the vertex loop never has. Where the
+    // unfold's tree branches disagree about a rim vertex's position, the
+    // average of its placed copies is used.
+    const { loops } = selectedBoundaryLoops(model, selected);
+    const pos = new Map();
+    for (const face of placedFaces) {
+      face.ids.forEach((vertexId, k) => {
+        const p = face.polygon[k];
+        const s = pos.get(vertexId) || { x: 0, y: 0, n: 0 };
+        s.x += p[0]; s.y += p[1]; s.n++;
+        pos.set(vertexId, s);
+      });
+    }
+    let bestLoop = [];
+    let bestPer = -1;
+    for (const loop of loops) {
+      const per = loopPerimeter(model, loop);
+      if (per > bestPer) { bestPer = per; bestLoop = loop; }
+    }
+    if (loops.length > 1) {
+      warnings.push(`${loops.length - 1} interior hole loop${loops.length === 2 ? "" : "s"} ignored.`);
+    }
+    outline = bestLoop
+      .map((vertexId) => pos.get(vertexId))
+      .filter(Boolean)
+      .map((s) => [s.x / s.n, s.y / s.n]);
+  } else {
+    // A seam cut must appear in the outline (opened cones/tubes), which
+    // only the placed-edge chaining can produce.
+    outline = buildTrianglePatchBoundary(placedFaces, model.weldEps * 20, seam.edges);
+  }
   if (outline.length < 3) throw new Error("Could not construct one closed boundary for the curved selection.");
 
   const xs = outline.map((p) => p[0]);
@@ -619,6 +659,19 @@ function buildNetBoundary(placedFaces, hingeEdgeKeys, tolerance) {
   return removeDuplicateNeighbors(outer, tolerance);
 }
 
+function loopPerimeter(model, loop) {
+  let p = 0;
+  for (let i = 0; i < loop.length; i++) {
+    p += model.vertices[loop[i]].distanceTo(model.vertices[loop[(i + 1) % loop.length]]);
+  }
+  return p;
+}
+
+// A boundary loop much smaller than the selection's largest loop is a HOLE
+// (screw hole, vent), not a second rim that needs cutting open. A true
+// tube's two rims are comparable in size; a mounting hole is a fraction.
+const HOLE_LOOP_RATIO = 0.35;
+
 function resolveTrianglePatchSeam(model, selected, rootTriangleId, options = {}) {
   const manual = Array.isArray(options.seamTriangleIds)
     ? options.seamTriangleIds.map(Number).filter((id) => selected.has(id))
@@ -640,15 +693,34 @@ function resolveTrianglePatchSeam(model, selected, rootTriangleId, options = {})
     throw new Error("Closed surface selected. Select only the side surface or add a seam/cut first.");
   }
 
-  if (loops.length === 1) {
+  // Holes are ignored for seam purposes: a disk-with-holes unfolds as a
+  // plain tree, and treating a screw hole as a tube rim used to cut an
+  // outer->hole seam that shredded the unfold (Yubi finger pad: 3 loops,
+  // the two ~18mm screw holes vs a 181mm outer boundary — the "seam"
+  // disconnected 557 of 606 triangles). The final outline chaining already
+  // keeps only the largest 2D loop, so ignored holes simply close over.
+  const byPerimeter = loops
+    .map((loop) => ({ loop, perimeter: loopPerimeter(model, loop) }))
+    .sort((a, b) => b.perimeter - a.perimeter);
+  const significant = byPerimeter
+    .filter((item) => item.perimeter >= HOLE_LOOP_RATIO * byPerimeter[0].perimeter)
+    .map((item) => item.loop);
+  const holeCount = loops.length - significant.length;
+  const holeNote = holeCount
+    ? ` (${holeCount} small hole loop${holeCount === 1 ? "" : "s"} ignored)`
+    : "";
+
+  if (significant.length === 1) {
     if (!autoSeam) {
-      return { edges: new Set(), message: "", boundaryLoopCount: loops.length };
+      return { edges: new Set(), message: holeNote.trim(), boundaryLoopCount: loops.length };
     }
-    const seamEdges = autoConeSeamEdges(model, selected, loops[0], rootTriangleId);
-    if (!seamEdges.size) return { edges: new Set(), message: "", boundaryLoopCount: loops.length };
+    const seamEdges = autoConeSeamEdges(model, selected, significant[0], rootTriangleId, loops);
+    if (!seamEdges.size) {
+      return { edges: new Set(), message: holeNote.trim(), boundaryLoopCount: loops.length };
+    }
     return {
       edges: seamEdges,
-      message: "auto seam applied",
+      message: "auto seam applied" + holeNote,
       boundaryLoopCount: loops.length,
     };
   }
@@ -657,13 +729,13 @@ function resolveTrianglePatchSeam(model, selected, rootTriangleId, options = {})
     throw new Error("This curved surface needs a seam. Turn on Auto seam or use Set seam.");
   }
 
-  const seamEdges = autoLoopToLoopSeamEdges(model, selected, loops, rootTriangleId);
+  const seamEdges = autoLoopToLoopSeamEdges(model, selected, significant, rootTriangleId);
   if (!seamEdges.size) {
     throw new Error("Could not build an auto seam between the curved surface boundary loops.");
   }
   return {
     edges: seamEdges,
-    message: "auto seam applied",
+    message: "auto seam applied" + holeNote,
     boundaryLoopCount: loops.length,
     boundaryEdgeCount: boundaryEdges.length,
   };
@@ -693,8 +765,12 @@ function autoLoopToLoopSeamEdges(model, selected, loops, rootTriangleId) {
   return seamEdgesFromVertexPath(shortestVertexPath(model, selected, start, end));
 }
 
-function autoConeSeamEdges(model, selected, boundaryLoop, rootTriangleId) {
-  const boundary = new Set(boundaryLoop);
+function autoConeSeamEdges(model, selected, boundaryLoop, rootTriangleId, allLoops = null) {
+  // Exclude the vertices of EVERY boundary loop from apex candidacy, not
+  // just the outer loop's: ignored hole rims are the densest vertices in
+  // the selection (fine hole tessellation), and the degree-scored apex
+  // used to lock onto a screw-hole rim instead of the surface's interior.
+  const boundary = new Set((allLoops ?? [boundaryLoop]).flat());
   const vertexUse = new Map();
   for (const triangleId of selected) {
     for (const vertexId of model.triVerts[triangleId]) {
@@ -719,6 +795,28 @@ function autoConeSeamEdges(model, selected, boundaryLoop, rootTriangleId) {
     }
   }
   if (apex === null || apexUseCount < 4) return new Set();
+
+  // Cut only when the apex concentrates REAL curvature. The angular defect
+  // (2π minus the sum of incident triangle angles) is what the cut opens
+  // up: a true cone/dome apex carries a large defect and the cut gapes; a
+  // gently curved pad has ~zero defect, and cutting it produces a seam
+  // that "opens" by microns — two nearly coincident edge copies that
+  // derail the 2D boundary walker into the "could not construct one
+  // closed boundary" failure (Yubi finger pad).
+  let apexAngleSum = 0;
+  for (const triangleId of trianglesTouchingVertices(model, selected, [apex])) {
+    const ids = model.triVerts[triangleId];
+    const k = ids.indexOf(apex);
+    if (k === -1) continue;
+    const p = model.vertices[apex];
+    const e1 = model.vertices[ids[(k + 1) % 3]].clone().sub(p);
+    const e2 = model.vertices[ids[(k + 2) % 3]].clone().sub(p);
+    const denom = e1.length() * e2.length();
+    if (denom > 1e-20) {
+      apexAngleSum += Math.acos(Math.max(-1, Math.min(1, e1.dot(e2) / denom)));
+    }
+  }
+  if (Math.abs(2 * Math.PI - apexAngleSum) < 0.15) return new Set();
 
   const apexTriangles = trianglesTouchingVertices(model, selected, [apex]);
   const start = nearestTriangleToPoint(model, apexTriangles, model.triCentroids[rootTriangleId] || model.vertices[apex]);
@@ -773,15 +871,31 @@ function selectionCentroid(model, selected) {
 function shortestVertexPath(model, selected, startVertex, endVertex) {
   if (startVertex === null || endVertex === null || startVertex === undefined || endVertex === undefined) return [];
   const adjacency = selectedVertexAdjacency(model, selected);
-  const queue = [startVertex];
+  // Dijkstra by 3D edge LENGTH, not hop count. Hop-count BFS preferred
+  // few-hop routes through large triangles — on mixed-density meshes the
+  // "path" zigzagged via ~20mm chords down a coarse side wall and back,
+  // and cutting that zigzag shredded the unfold tree into pieces (Yubi
+  // finger pad). A length-weighted path hugs the surface like a geodesic
+  // and cuts cleanly.
+  const dist = new Map([[startVertex, 0]]);
   const previous = new Map([[startVertex, null]]);
-  while (queue.length) {
-    const vertexId = queue.shift();
+  const done = new Set();
+  while (true) {
+    let vertexId = null;
+    let best = Infinity;
+    for (const [v, d] of dist) {
+      if (!done.has(v) && d < best) { best = d; vertexId = v; }
+    }
+    if (vertexId === null) break;
     if (vertexId === endVertex) break;
+    done.add(vertexId);
     for (const next of adjacency.get(vertexId) || []) {
-      if (previous.has(next)) continue;
-      previous.set(next, vertexId);
-      queue.push(next);
+      if (done.has(next)) continue;
+      const d = best + model.vertices[vertexId].distanceTo(model.vertices[next]);
+      if (d < (dist.get(next) ?? Infinity)) {
+        dist.set(next, d);
+        previous.set(next, vertexId);
+      }
     }
   }
   if (!previous.has(endVertex)) return [];
@@ -849,10 +963,7 @@ function sharedEdgeBetweenTriangles(model, triangleA, triangleB) {
 }
 
 function buildTrianglePatchBoundary(placedFaces, tolerance, seamEdges = new Set()) {
-  const scale = 1 / Math.max(tolerance, 1e-8);
-  const pointKey = (p) => `${Math.round(p[0] * scale)},${Math.round(p[1] * scale)}`;
   const meshEdges = new Map();
-
   for (const face of placedFaces) {
     const n = face.ids.length;
     for (let i = 0; i < n; i++) {
@@ -862,13 +973,59 @@ function buildTrianglePatchBoundary(placedFaces, tolerance, seamEdges = new Set(
       const a = face.polygon[i];
       const b = face.polygon[(i + 1) % n];
       if (!meshEdges.has(key)) meshEdges.set(key, []);
-      meshEdges.get(key).push({ a, b, start: pointKey(a), end: pointKey(b), used: false });
+      meshEdges.get(key).push({ a, b, used: false });
+    }
+  }
+
+  // Chaining snap tolerance must scale with the mesh, not the weld
+  // epsilon: each boundary edge's 2D endpoints come from the transform of
+  // the one triangle that owns it, and the accumulated hinge float drift
+  // across a few hundred placed triangles moves the SAME welded vertex by
+  // more than weldEps*20 between neighboring rim triangles. With the old
+  // micron-scale tolerance the walk around a perfectly clean rim missed
+  // its own next edge and every loop dead-ended — the Yubi finger pad's
+  // "could not construct one closed boundary" (178 clean boundary edges,
+  // zero closed loops). A fraction of the median boundary edge length
+  // rides far above drift and far below real geometry.
+  const lens = [];
+  for (const items of meshEdges.values()) {
+    if (items.length === 1) {
+      const it = items[0];
+      lens.push(Math.hypot(it.a[0] - it.b[0], it.a[1] - it.b[1]));
+    }
+  }
+  lens.sort((x, y) => x - y);
+  const median = lens.length ? lens[Math.floor(lens.length / 2)] : 0;
+  tolerance = Math.max(tolerance, Math.min(0.2 * median, 0.5));
+  const scale = 1 / Math.max(tolerance, 1e-8);
+  const pointKey = (p) => `${Math.round(p[0] * scale)},${Math.round(p[1] * scale)}`;
+  for (const items of meshEdges.values()) {
+    for (const it of items) {
+      it.start = pointKey(it.a);
+      it.end = pointKey(it.b);
     }
   }
 
   const edges = [];
   for (const [key, items] of meshEdges) {
-    if (items.length === 1 || seamEdges.has(key)) edges.push(...items);
+    if (items.length === 1) {
+      edges.push(...items);
+      continue;
+    }
+    if (!seamEdges.has(key)) continue;
+    // A seam edge belongs on the boundary only where the cut actually
+    // OPENED. On a gently curved patch the angular defect is ~zero, the
+    // unfold reproduces identical positions on both sides of the cut, and
+    // pooling two exactly-coincident opposite copies derails the boundary
+    // walker into dead ends (Yubi finger pad: 184 pooled edges, zero
+    // closed loops — the reported "could not construct one closed
+    // boundary"). A closed cut is simply not a boundary; skip it. Real
+    // cone cuts gape open and keep both sides.
+    const minOpen = Math.max(tolerance * 4, 0.05);
+    const opened = items.length !== 2
+      || Math.hypot(items[0].a[0] - items[1].b[0], items[0].a[1] - items[1].b[1]) > minOpen
+      || Math.hypot(items[0].b[0] - items[1].a[0], items[0].b[1] - items[1].a[1]) > minOpen;
+    if (opened) edges.push(...items);
   }
   return chainBoundaryEdges(edges, tolerance);
 }
@@ -881,6 +1038,7 @@ function chainBoundaryEdges(edges, tolerance) {
   }
 
   const loops = [];
+  const fragments = [];
   for (let startIndex = 0; startIndex < edges.length; startIndex++) {
     if (edges[startIndex].used) continue;
     const first = edges[startIndex];
@@ -898,7 +1056,50 @@ function chainBoundaryEdges(edges, tolerance) {
       loop.push(next.a);
       current = next;
     }
-    if (current.end === first.start && loop.length >= 3) loops.push(loop);
+    if (current.end === first.start && loop.length >= 3) {
+      loops.push(loop);
+    } else if (loop.length >= 2) {
+      fragments.push([...loop, current.b]);
+    }
+  }
+
+  // On strongly curved selections the approximate unfold's tree branches
+  // meet along the rim MISALIGNED — by millimeters, not float drift — so
+  // the 2D boundary arrives as open fragments and the strict walk above
+  // closes nothing ("could not construct one closed boundary" on the Yubi
+  // finger pad: 178 clean rim edges, fragments of 28/41/17 points, zero
+  // closed loops). The unfold is still the approximation the overlap
+  // warnings already flag, so make the boundary total: close a fragment
+  // onto itself, or splice the nearest fragment end on, whenever the gap
+  // is small relative to the geometry. Distant fragments (a hole rim vs
+  // the outer rim) stay separate, and holes are discarded by the
+  // largest-loop rule below.
+  const gapLimit = Math.max(2.0, 20 * tolerance);
+  const gapDist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+  const open = fragments.filter((f) => f.length >= 3);
+  let stitchGuard = 0;
+  while (open.length && stitchGuard++ < 1000) {
+    open.sort((a, b) => b.length - a.length);
+    const cur = open.shift();
+    let best = null;
+    for (let i = 0; i < open.length; i++) {
+      const head = gapDist(cur[cur.length - 1], open[i][0]);
+      const tail = gapDist(cur[cur.length - 1], open[i][open[i].length - 1]);
+      const cand = Math.min(head, tail);
+      if (cand <= gapLimit && (!best || cand < best.dist)) {
+        best = { i, dist: cand, reversed: tail < head };
+      }
+    }
+    if (best) {
+      const piece = open.splice(best.i, 1)[0];
+      if (best.reversed) piece.reverse();
+      open.push(cur.concat(piece));
+      continue;
+    }
+    if (cur.length >= 4 && gapDist(cur[0], cur[cur.length - 1]) <= gapLimit) {
+      loops.push(cur.slice(0, -1));
+    }
+    // otherwise: an isolated sliver — drop it.
   }
 
   if (!loops.length) return [];
