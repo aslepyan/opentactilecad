@@ -359,10 +359,15 @@ export function unfoldSelectedTriangles(model, selectedTriangleIds, rootTriangle
   const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
   const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
   let centeredOutline = outline.map(([x, y]) => [x - cx, y - cy]);
-  let foldLines = usedHinges.map((h) => [
-    [h.a[0] - cx, h.a[1] - cy],
-    [h.b[0] - cx, h.b[1] - cy],
-  ]);
+  // No fold guides for a curved unfold. It hinges at EVERY triangle, so
+  // mapping the used hinges painted the whole triangulation as hundreds
+  // of orange "fold lines" (user report on the Yubi pad) — and none of
+  // them can ever be a real crease: the smooth flood-fill that built the
+  // selection stops at anything sharper than its curvature tolerance, so
+  // every interior hinge is by construction a micro-bend of a surface
+  // that is bent continuously, not folded. (The planar multi-face unfold
+  // keeps its fold lines: those are real folds between flat faces.)
+  let foldLines = [];
 
   if (polyArea(centeredOutline) < 0) centeredOutline.reverse();
   centeredOutline = simplifyCollinear(centeredOutline);
