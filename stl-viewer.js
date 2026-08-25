@@ -310,7 +310,7 @@ function selectFaceAt(clientX, clientY) {
       curvedSelectionMeta = patch;
       manualSeamTriangles = [];
       refreshHighlight();
-      showCombinedSelectionStatus("Click Unfold selection when ready.");
+      showCombinedSelectionStatus(unfoldHint());
     } catch (error) {
       showError(error.message);
     }
@@ -351,7 +351,7 @@ function selectFaceAt(clientX, clientY) {
   invalidateChain();
   manualSeamTriangles = [];
   refreshHighlight();
-  showCombinedSelectionStatus("Click Unfold selection when ready.");
+  showCombinedSelectionStatus(unfoldHint());
 }
 
 function unfoldCurrentSelection() {
@@ -450,11 +450,12 @@ function orderedClickEntries() {
   return entries.reverse();
 }
 
-// Two-stage flow, matching the original stl_viewer.js design: Unfold
-// computes the joined chain and shows a PREVIEW (small 2D outline + one row
-// per straight cut with corner picking) — nothing touches the board editor
-// yet, so picking corners never trips the editor's overwrite confirmation.
-// "Use this shape" hands the current outline off exactly once.
+// Guided flow for disconnected selections: corner picking is a REQUIRED
+// step, not a fix-up. "Join surfaces" walks the chain cut by cut — the
+// backend (corners_first) stops at the first cut without user-picked
+// corners and returns its marker loops; the automatic corner heuristic
+// never runs. Only when every cut has picked corners does the outline
+// exist, and only "Use this shape" hands it to the board editor.
 async function unfoldViaBackendChain() {
   if (chainBusy) return;
   if (!stlBuffer) {
@@ -469,13 +470,14 @@ async function unfoldViaBackendChain() {
 
   chainBusy = true;
   unfoldBtn.disabled = true;
-  infoEl.textContent = `${loadedName} · joining ${entries.length} surfaces (straight cuts between non-touching ones)…`;
+  infoEl.textContent = `${loadedName} · analyzing how ${entries.length} surfaces connect…`;
   try {
     const form = new FormData();
     form.append("file", new Blob([stlBuffer]), loadedName || "model.stl");
     form.append("click_face_indices", entries.map((e) => e.faceIndex).join(","));
     form.append("click_regions", JSON.stringify(entries.map((e) => [...e.triangles])));
     form.append("connection_overrides", JSON.stringify(chainOverrides));
+    form.append("corners_first", "true");
 
     const response = await fetch(`${API_BASE}/unroll-mesh-chain`, { method: "POST", body: form });
     if (!response.ok) {
@@ -488,9 +490,14 @@ async function unfoldViaBackendChain() {
     chainData = await response.json();
     chainData.entryCount = entries.length;
     renderChainPanel();
-    infoEl.textContent =
-      `${loadedName} · joined ${entries.length} surfaces · ` +
-      `review the cuts below, pick corners where needed, then "Use this shape".`;
+    const pending = chainData.pending_connection;
+    if (pending !== null && pending !== undefined) {
+      startCornerPick(pending, chainData.connections[pending]);
+    } else {
+      infoEl.textContent =
+        `${loadedName} · all cuts joined with your corners · ` +
+        `check the preview, then "Use this shape".`;
+    }
   } catch (error) {
     showError(error.message);
   } finally {
@@ -569,17 +576,22 @@ function renderChainPanel() {
     return;
   }
 
+  const pending = chainData.pending_connection ?? null;
   let finalized = null;
-  try {
-    finalized = finalizeChainOutline(chainData.outline);
-  } catch {}
+  if (pending === null && (chainData.outline || []).length >= 3) {
+    try {
+      finalized = finalizeChainOutline(chainData.outline);
+    } catch {}
+  }
 
-  const canvas = document.createElement("canvas");
-  canvas.className = "chain-preview";
-  canvas.width = 260;
-  canvas.height = 150;
-  connectionsEl.appendChild(canvas);
-  if (finalized) drawChainPreview(canvas, finalized.outline);
+  if (finalized) {
+    const canvas = document.createElement("canvas");
+    canvas.className = "chain-preview";
+    canvas.width = 260;
+    canvas.height = 150;
+    connectionsEl.appendChild(canvas);
+    drawChainPreview(canvas, finalized.outline);
+  }
 
   const dims = document.createElement("div");
   dims.className = "chain-dims";
@@ -587,27 +599,30 @@ function renderChainPanel() {
   const worstDev = Math.max(0, ...(chainData.region_developability_mm || []));
   dims.textContent = (finalized
     ? `${finalized.w.toFixed(1)} × ${finalized.h.toFixed(1)} mm · yellow = cable edge`
-    : "could not build a preview outline")
-    + ` · ${strutCount} straight cut${strutCount === 1 ? "" : "s"}`
+    : "Pick the matching corners for each cut — the unfolded shape appears once every cut is joined.")
+    + ` · ${strutCount} straight cut${strutCount === 1 ? "" : "s"} so far`
     + (worstDev > 1.0 ? ` · distortion up to ${worstDev.toFixed(1)}mm` : "");
   connectionsEl.appendChild(dims);
 
   for (const [index, connection] of chainData.connections.entries()) {
     if (!connection.needs_strut) continue;
+    const isPending = index === pending;
     const row = document.createElement("div");
-    row.className = "conn-row warn";
+    row.className = isPending ? "conn-row pending" : "conn-row warn";
     const label = document.createElement("span");
-    const kind = chainOverrides[index] ? "your corners" : "auto corners";
+    const kind = isPending ? "corners needed" : (chainOverrides[index] ? "your corners" : "auto corners");
     label.innerHTML =
-      `Cut ${index + 1}&harr;${index + 2}: <span class="conn-kind">straight cut, ${kind}</span>`;
+      `Cut ${index + 1}&harr;${index + 2}: <span class="conn-kind">${kind}</span>`;
     const pick = document.createElement("button");
     pick.type = "button";
     pick.className = "secondary";
     pick.disabled = chainBusy;
-    pick.textContent = cornerPick?.connIndex === index ? "Cancel" : "Pick corners";
+    pick.textContent = cornerPick?.connIndex === index
+      ? "Cancel"
+      : (isPending ? "Pick corners" : "Repick");
     pick.addEventListener("click", () => {
       if (cornerPick?.connIndex === index) {
-        endCornerPick("corner picking cancelled");
+        endCornerPick("corner picking cancelled — the cut still needs corners");
       } else {
         startCornerPick(index, connection);
       }
@@ -624,6 +639,7 @@ function renderChainPanel() {
   use.className = "primary";
   use.textContent = "Use this shape";
   use.disabled = chainBusy || !finalized;
+  use.title = finalized ? "" : "Pick corners for every cut first.";
   use.addEventListener("click", useChainShape);
   actions.appendChild(use);
   connectionsEl.appendChild(actions);
@@ -659,7 +675,8 @@ function startCornerPick(connIndex, connection) {
   cornerPick = { connIndex, pairs: [], pendingA: null, markerGroup, previewGroup };
   renderChainPanel();
   infoEl.textContent =
-    "Pick corner pair 1 of 2: click a marker on the existing chain (colored), then its partner on the new surface (pink).";
+    `Cut ${connIndex + 1}↔${connIndex + 2} · corner pair 1 of 2: click a colored marker ` +
+    "on the joined part, then its matching pink marker on the new surface.";
 }
 
 function endCornerPick(message = "") {
@@ -716,8 +733,16 @@ function pickCornerAt(clientX, clientY) {
   cornerPick.pendingA = null;
 
   if (cornerPick.pairs.length < 2) {
-    infoEl.textContent = "Pick corner pair 2 of 2: chain marker first, then its pink partner.";
+    infoEl.textContent =
+      `Cut ${cornerPick.connIndex + 1}↔${cornerPick.connIndex + 2} · corner pair 2 of 2: ` +
+      "colored marker first, then its pink partner.";
     return;
+  }
+  // Later cuts attach to the chain this cut just reshaped, so their picked
+  // corners no longer describe the same boundary — clear them and let the
+  // guided walk re-request each one in order.
+  for (const key of Object.keys(chainOverrides)) {
+    if (Number(key) > cornerPick.connIndex) delete chainOverrides[key];
   }
   chainOverrides[cornerPick.connIndex] = cornerPick.pairs;
   endCornerPick();
@@ -783,6 +808,21 @@ function refreshHighlight() {
   scene.add(highlightMesh);
   clearFaceBtn.disabled = false;
   unfoldBtn.disabled = false;
+  // Make the required next step visible: a disconnected selection is not
+  // unfolded directly — the button starts the join-and-pick-corners walk.
+  unfoldBtn.textContent = selectionIsDisconnected() ? "Join surfaces…" : "Unfold selection";
+}
+
+function selectionIsDisconnected() {
+  if (!surfaceModel) return false;
+  const combined = combinedSelectedTriangles();
+  return combined.size > 0 && selectionComponentCount(combined) > 1;
+}
+
+function unfoldHint() {
+  return selectionIsDisconnected()
+    ? 'surfaces don’t touch — click "Join surfaces…" to pick the connecting corners'
+    : "Click Unfold selection when ready.";
 }
 
 function combinedSelectedTriangles() {
