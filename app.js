@@ -1360,6 +1360,7 @@ async function runGenerate(overrides = {}) {
     return;
   }
   genStatus.textContent = "Generating… (may take a few seconds)";
+  generateInFlight = true;
   statsEl.innerHTML = "";
   connectorUpsizeEl.hidden = true;
   downloadBtn.disabled = true;
@@ -1382,6 +1383,7 @@ async function runGenerate(overrides = {}) {
       throw new Error(detail.detail || `HTTP ${resp.status}`);
     }
     const data = await resp.json();
+    markBackendAlive();
     showSolvedGridSize(data.edit_data);
     if (data.edit_data) {
       routeEditor.load(data.edit_data, data.svg);
@@ -1402,6 +1404,8 @@ async function runGenerate(overrides = {}) {
     genStatus.textContent = "Done.";
   } catch (err) {
     genStatus.innerHTML = `<span class="error">Error: ${err.message}</span>`;
+  } finally {
+    generateInFlight = false;
   }
 }
 
@@ -1522,10 +1526,24 @@ downloadBtn.addEventListener("click", async () => {
 // ---- health ping ----
 // Retries rather than probing once. When the backend is a free-tier Render
 // instance it sleeps after ~15 minutes idle and takes 30-60s to wake, so the
-// first visitor after a quiet spell always hits a booting service. A single
-// fetch fails against that and latches the badge to "unreachable" for the rest
-// of the page's life — reporting the backend as down when it is merely cold,
-// and never correcting itself once it comes up.
+// first visitor after a quiet spell always hits a booting service.
+//
+// Three rules keep the badge honest (each was a real false-"unreachable"):
+//  * It never latches: after the wake window it keeps re-probing every 30s,
+//    so a backend that comes up late still turns the badge green.
+//  * A successful generate marks the backend alive directly - a response IS
+//    proof of life, regardless of what the last probe said.
+//  * While OUR OWN generate is in flight it does not probe at all: the
+//    single backend worker is busy computing that request and cannot answer
+//    /health, which is business as usual, not an outage.
+let generateInFlight = false;
+function markBackendAlive() {
+  const el = document.getElementById("health");
+  if (!el) return;
+  el.textContent = "backend: ok";
+  el.className = "health health--ok";
+  el.title = "";
+}
 (function pingHealth() {
   const el = document.getElementById("health");
   const DEADLINE_MS = 90000;   // covers a cold start with room to spare
@@ -1533,6 +1551,13 @@ downloadBtn.addEventListener("click", async () => {
   let delay = 1000;
 
   async function attempt() {
+    if (generateInFlight) {
+      el.textContent = "backend: working…";
+      el.className = "health health--unknown";
+      el.title = "A generate is running; the backend answers again when it finishes.";
+      setTimeout(attempt, 5000);
+      return;
+    }
     try {
       // Per-try timeout: a request to a waking instance can hang well past the
       // point where retrying is the better move.
@@ -1541,15 +1566,14 @@ downloadBtn.addEventListener("click", async () => {
       const r = await fetch(`${API_BASE}/health`, { signal: ctl.signal, cache: "no-store" });
       clearTimeout(t);
       if (r.ok) {
-        el.textContent = "backend: ok";
-        el.className = "health health--ok";
+        markBackendAlive();
         return;
       }
     } catch {
       /* fall through to the retry below */
     }
     if (Date.now() - started < DEADLINE_MS) {
-      el.textContent = "backend: waking\u2026";
+      el.textContent = "backend: waking…";
       el.className = "health health--unknown";
       el.title = "The backend sleeps when idle and takes up to a minute to start.";
       setTimeout(attempt, delay);
@@ -1558,7 +1582,8 @@ downloadBtn.addEventListener("click", async () => {
     }
     el.textContent = "backend: unreachable";
     el.className = "health health--down";
-    el.title = "Could not reach " + (API_BASE || "the backend") + " after 90s.";
+    el.title = "Could not reach " + (API_BASE || "the backend") + " after 90s. Retrying in the background.";
+    setTimeout(attempt, 30000);   // never latch
   }
   attempt();
 })();
