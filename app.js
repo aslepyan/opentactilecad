@@ -1128,6 +1128,16 @@ window.addEventListener("otc:load-example", (e) => {
   runGenerate();
 });
 
+// Dev annotation capture (stl-viewer.js "Save as example") reads the outline
+// exactly as it currently sits on the canvas — including any cable-edge
+// rotation or hand-editing done AFTER the unfold — rather than the raw
+// unfold result, so a saved annotation reproduces what was actually on
+// screen when it was saved, not a stale pre-confirmation snapshot.
+window.otcGetOutlineState = () => ({
+  vertices: vertices.map((p) => p.slice()),
+  cableEdgeConfirmed,
+});
+
 // ---- generate ----
 const genStatus = document.getElementById("gen-status");
 const statsEl = document.getElementById("stats");

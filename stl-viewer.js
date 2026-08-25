@@ -1279,10 +1279,20 @@ if (captureBtn && API_BASE === "") {
   captureBtn.hidden = false;
   captureBtn.addEventListener("click", async () => {
     if (!loadedName) { showError("Load an STL first."); return; }
+    const outlineState = window.otcGetOutlineState ? window.otcGetOutlineState() : null;
+    if (!outlineState || outlineState.vertices.length < 3) {
+      showError("Unfold a selection into the Board Outline canvas first.");
+      return;
+    }
     const suggested = loadedName.replace(/\.stl$/i, "").replace(/[^A-Za-z0-9-_]+/g, "_");
     const name = window.prompt("Annotation name:", suggested);
     if (!name) return;
     const payload = {
+      // The shape only — the annotation is the surface selection and its
+      // unfolded outline, not a connector choice. Whoever loads this example
+      // later picks their own cable edge for their own setup, exactly like
+      // any other imported outline (DXF, hand-drawn).
+      outline: outlineState.vertices,
       stl_name: loadedName,
       selection_mode: selectionMode,
       curvature_tolerance_deg: Number.parseFloat(curvatureTolInput?.value) || 18,
@@ -1301,7 +1311,6 @@ if (captureBtn && API_BASE === "") {
       patch_loop_vertices: patchState?.closed ? patchLoopVertices() : null,
       patch_side_index: patchState?.closed ? patchState.sideIndex : null,
       patch_smooth: patchState?.closed ? patchSmoothInput?.checked !== false : null,
-      outline: lastOutlineDetail ? lastOutlineDetail.outline : null,
       fold_lines: lastOutlineDetail ? (lastOutlineDetail.foldLines || []) : [],
       unfold_size_mm: lastOutlineDetail ? [lastOutlineDetail.w, lastOutlineDetail.h] : null,
       captured_at: new Date().toISOString(),
