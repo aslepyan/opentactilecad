@@ -16,6 +16,14 @@ let vertices = [];
 let fillVertices = [];
 let editTarget = "outline"; // "outline" | "fill"
 let foldLines = [];
+// The cable edge (edge 0->1, where the connector tail exits) must be an
+// EXPLICIT choice for hand-drawn outlines: the old silent "first edge you
+// drew" default put a user's connector on an interior chord they never
+// intended (a board that routed 1 sensor instead of 119). Drawing or
+// reshaping the outline clears this; pressing "Set cable edge" sets it;
+// imported/unfolded/preset outlines arrive with a deliberate first edge
+// and count as set. Generate refuses to run while unset.
+let cableEdgeConfirmed = false;
 let selected = null;
 let mode = "select";
 let dragState = null;
@@ -110,6 +118,7 @@ function pushUndo() {
     vertices: cloneVertices(vertices),
     fillVertices: cloneVertices(fillVertices),
     foldLines: foldLines.map(([a, b]) => [a.slice(), b.slice()]),
+    cableEdgeConfirmed,
   });
   if (undoStack.length > 80) undoStack.shift();
   redoStack = [];
@@ -120,6 +129,7 @@ function restoreSnapshot(snapshot) {
   vertices = cloneVertices(snapshot.vertices);
   fillVertices = cloneVertices(snapshot.fillVertices || []);
   foldLines = snapshot.foldLines.map(([a, b]) => [a.slice(), b.slice()]);
+  cableEdgeConfirmed = snapshot.cableEdgeConfirmed ?? false;
   selected = null;
   previewPoint = null;
   arcState = null;
@@ -251,6 +261,7 @@ function sampleArcPoints(center, start, end) {
 function appendArcPoints(points) {
   if (!points.length) return;
   if (editTarget === "outline" && foldLines.length) foldLines = [];
+  if (editTarget === "outline") cableEdgeConfirmed = false;
   const verts = activeArray();
   const merged = points.slice();
   if (verts.length && Math.hypot(verts[verts.length - 1][0] - merged[0][0], verts[verts.length - 1][1] - merged[0][1]) <= 1e-6) {
@@ -348,7 +359,15 @@ function drawOutlinePolygon() {
     const [ax, ay] = mmToPx(...vertices[0]);
     const [bx, by] = mmToPx(...vertices[1]);
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
-    ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 3.5; ctx.stroke();
+    if (cableEdgeConfirmed) {
+      ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 3.5; ctx.stroke();
+    } else {
+      // Not chosen yet: show where the default WOULD land, clearly tentative.
+      ctx.save();
+      ctx.strokeStyle = "#8a7040"; ctx.lineWidth = 2.5; ctx.setLineDash([5, 5]);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // Shared edges retained by the unfolding tree. These are bend/fold guides,
@@ -540,10 +559,13 @@ function drawDimensions(verts) {
 function setOutlineInfo(extra) {
   const verts = activeArray();
   const label = editTarget === "fill" ? "sensorize-zone" : "outline";
+  const cableNote = editTarget === "outline" && verts.length >= 2
+    ? (cableEdgeConfirmed
+        ? " · cable edge = orange"
+        : " · cable edge NOT SET — select an edge, press Set cable edge")
+    : "";
   outlineInfo.textContent =
-    `${verts.length} ${label} vertices` +
-    (editTarget === "outline" && verts.length >= 2 ? " · cable edge = orange" : "") +
-    (extra ? ` · ${extra}` : "");
+    `${verts.length} ${label} vertices` + cableNote + (extra ? ` · ${extra}` : "");
 }
 
 function setMode(nextMode) {
@@ -619,6 +641,7 @@ function rectVertices(a, b) {
 
 function addLinePoint(p, event) {
   if (editTarget === "outline" && foldLines.length) foldLines = [];
+  if (editTarget === "outline") cableEdgeConfirmed = false;
   angleReferenceEdge = null;
   const verts = activeArray();
   if (!verts.length) {
@@ -741,7 +764,10 @@ canvas.addEventListener("pointerup", (event) => {
   if (!dragState) return;
   if (dragState.type === "rect-preview") {
     setActiveArray(rectVertices(dragState.start, snapPoint(dragState.current)));
-    if (editTarget === "outline") foldLines = [];
+    if (editTarget === "outline") {
+      foldLines = [];
+      cableEdgeConfirmed = false;
+    }
     angleReferenceEdge = null;
     fitViewTo(activeArray());
     setMode("select");
@@ -822,11 +848,17 @@ cadDeleteBtn.addEventListener("click", () => {
   let verts = activeArray();
   if (selected.type === "vertex" && verts.length > 3) {
     verts = verts.slice(); verts.splice(selected.index, 1);
+    if (editTarget === "outline" && selected.index <= 1) cableEdgeConfirmed = false;
   } else if (selected.type === "edge" && verts.length > 3) {
-    verts = verts.slice(); verts.splice((selected.index + 1) % verts.length, 1);
+    const gone = (selected.index + 1) % verts.length;
+    verts = verts.slice(); verts.splice(gone, 1);
+    if (editTarget === "outline" && gone <= 1) cableEdgeConfirmed = false;
   } else if (selected.type === "outline") {
     verts = [];
-    if (editTarget === "outline") foldLines = [];
+    if (editTarget === "outline") {
+      foldLines = [];
+      cableEdgeConfirmed = false;
+    }
   }
   setActiveArray(verts);
   selected = null;
@@ -848,8 +880,9 @@ cadSetCableBtn.addEventListener("click", () => {
   vertices = vertices.slice(i).concat(vertices.slice(0, i));
   selected = { type: "edge", index: 0 };
   angleReferenceEdge = null;
+  cableEdgeConfirmed = true;
   hideCableEdgeBanner();
-  redraw(); setOutlineInfo("cable edge updated"); syncDimensionFields(); updateCadButtons();
+  redraw(); setOutlineInfo("cable edge set"); syncDimensionFields(); updateCadButtons();
 });
 cadZoomOutBtn.addEventListener("click", () => zoomView(0.82));
 cadZoomInBtn.addEventListener("click", () => zoomView(1.22));
@@ -945,7 +978,10 @@ for (const [id, coords] of Object.entries(PRESET_SHAPES)) {
     if (!confirmOverwrite(activeArray().length, editTarget === "fill" ? "sensorize zone" : "board outline")) return;
     pushUndo();
     setActiveArray(coords.map((p) => [p[0], p[1]]));
-    if (editTarget === "outline") foldLines = [];
+    if (editTarget === "outline") {
+      foldLines = [];
+      cableEdgeConfirmed = true;   // presets carry a designed cable edge
+    }
     selected = null;
     angleReferenceEdge = null;
     fitViewTo(activeArray()); redraw(); setOutlineInfo(); syncDimensionFields(); updateCadButtons();
@@ -974,6 +1010,9 @@ window.addEventListener("otc:face-outline", (e) => {
   updateTargetButtons();
   vertices = e.detail.outline.map((p) => [p[0], p[1]]);
   foldLines = (e.detail.foldLines || []).map(([a, b]) => [a.slice(), b.slice()]);
+  // The unfold flow rotates a deliberately-chosen lowest edge into the
+  // cable slot — a computed default, not an accident of drawing order.
+  cableEdgeConfirmed = true;
   selected = null;
   angleReferenceEdge = null;
   fitViewTo(vertices);
@@ -990,6 +1029,7 @@ window.addEventListener("otc:face-clear", () => {
   vertices = [];
   fillVertices = [];
   foldLines = [];
+  cableEdgeConfirmed = false;
   selected = null;
   angleReferenceEdge = null;
   resetView();
@@ -1008,6 +1048,10 @@ window.addEventListener("otc:dxf-outline", (e) => {
   updateTargetButtons();
   vertices = e.detail.outline.map((p) => [p[0], p[1]]);
   foldLines = [];
+  // A DXF loop's first edge is an accident of the file's vertex order —
+  // exactly the unreliable default being abolished. Its banner has always
+  // asked the user to confirm; now that confirmation is required.
+  cableEdgeConfirmed = false;
   selected = null;
   angleReferenceEdge = null;
   fitViewTo(vertices);
@@ -1357,6 +1401,13 @@ function updateConnectorUpsizeControl(currentConnectorPos) {
 async function runGenerate(overrides = {}) {
   if (vertices.length < 3) {
     genStatus.innerHTML = `<span class="error">Need at least 3 outline vertices.</span>`;
+    return;
+  }
+  if (!cableEdgeConfirmed) {
+    genStatus.innerHTML =
+      `<span class="error">Cable edge not set — click the edge where the connector ` +
+      `tail should exit, then press <strong>Set cable edge</strong>.</span>`;
+    showCableEdgeBanner();
     return;
   }
   genStatus.textContent = "Generating… (may take a few seconds)";

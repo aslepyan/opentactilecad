@@ -255,11 +255,12 @@
             <h2>Board Outline</h2>
           </div>
           <p class="hint">
-            Use Line, Rectangle, or Arc to draw the outline. The first edge defines
-            the cable edge unless you select another edge and set it.
+            Use Line, Rectangle, or Arc to draw the outline, then select the edge
+            where the connector tail should exit and press <strong>Set cable edge</strong>
+            (required before Generate).
           </p>
           <div id="cable-edge-banner" class="cable-edge-banner" hidden>
-            <span>Imported outline loaded — click an edge below and press <strong>Set cable edge</strong> to confirm where the connector tail exits (the first edge is used by default).</span>
+            <span>Choose where the connector tail exits: click an edge below and press <strong>Set cable edge</strong>. Generate stays blocked until the cable edge is set.</span>
             <button id="cable-edge-banner-close" type="button" aria-label="Dismiss cable edge reminder">×</button>
           </div>
           <div class="outline-editor">
@@ -419,7 +420,7 @@
           <h2>Getting a board shape</h2>
           <p>Every design starts the same way: get a closed 2D outline into the Board Outline canvas. There are three ways to do that — mix and match, or switch mid-project using the Mode switcher.</p>
           <h3>Draw</h3>
-          <p>Use the Line, Rectangle, H/V, and Arc tools to sketch your outline directly. The <strong>first edge you draw becomes the cable edge</strong> (shown in orange) — this is the side the connector tail exits from. Select a different edge and click <strong>Set cable edge</strong> to change it. This isn't just freehand: select a vertex or edge and type an exact <strong>Length</strong> and <strong>Angle</strong> in the fields above the canvas to dimension it precisely, like a real CAD program.</p>
+          <p>Use the Line, Rectangle, H/V, and Arc tools to sketch your outline directly. When you're done, <strong>select the edge where the connector tail should exit and click Set cable edge</strong> (it turns orange) — Generate is blocked until this is set, so a stray first stroke can never silently become the connector edge. This isn't just freehand: select a vertex or edge and type an exact <strong>Length</strong> and <strong>Angle</strong> in the fields above the canvas to dimension it precisely, like a real CAD program.</p>
           <h3>DXF</h3>
           <p>Upload a closed 2D outline exported from AutoCAD, Fusion 360, or similar CAD tools. We automatically pick the <strong>largest closed shape</strong> in the file (in case it contains extra reference geometry) and scale it to millimeters using the file's unit metadata. A DXF outline has no inherent cable edge — confirm or change it with <strong>Set cable edge</strong> after import.</p>
           <h3>STL</h3>
