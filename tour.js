@@ -31,7 +31,7 @@ function modeStep(mode) {
     return [{
       view: "tool", mode: "stl", selector: "#stl-sidebar-group",
       title: "Mode: Import an STL",
-      body: "This is what \"Import an STL\" from the start screen opens. Upload a 3D model of the real part your sensor will wrap around, click a face (or a smoothly curved patch), then press Unfold selection — it flattens that surface to true scale, like unwrapping paper from the part, so the resulting flex PCB fits it exactly. Selecting several surfaces that don't share an edge? The tool walks you through clicking matching corner points on each, so you control exactly how they join.",
+      body: "This is what \"Import an STL\" from the start screen opens. Upload a 3D model of the real part your sensor will wrap around, click a face (or a smoothly curved patch), then press Unfold selection — it flattens that surface to true scale, like unwrapping paper from the part, so the resulting flex PCB fits it exactly. Selecting several surfaces that don't share an edge? The tool walks you through clicking matching corner points on each, so you control exactly how they join. On a textured or oddly-shaped surface, try Draw patch instead: click points directly on the model to outline your sensor by hand, and texture like tread patterns gets smoothed away. Either way, confirm the cable edge once the outline loads — the app never picks it for you.",
     }];
   }
   return [

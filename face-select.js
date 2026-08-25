@@ -1551,31 +1551,72 @@ export function shortestSurfacePath(model, startVertex, endVertex) {
   return path.reverse();
 }
 
+function firstFaceTouchingVertex(model, vertexId) {
+  for (let t = 0; t < model.triVerts.length; t++) {
+    const ids = model.triVerts[t];
+    if (ids[0] === vertexId || ids[1] === vertexId || ids[2] === vertexId) return t;
+  }
+  return -1;
+}
+
+function connectedFaces(model, seedFace) {
+  // Flood fill with NO edge blocked — the whole mesh shell touching `seedFace`.
+  const visited = new Set([seedFace]);
+  const stack = [seedFace];
+  while (stack.length) {
+    const t = stack.pop();
+    for (const adjacency of model.triAdjacency[t] || []) {
+      const n = adjacency.triangle;
+      if (visited.has(n)) continue;
+      visited.add(n);
+      stack.push(n);
+    }
+  }
+  return visited;
+}
+
 export function splitByLoop(model, loopVertexPath) {
   // loopVertexPath: closed vertex cycle (first == last is optional). Blocks its
   // edges and flood-fills triangles across every other shared edge; returns the
   // resulting components sorted smallest-area first. Two components = a clean
   // cut; one = the loop didn't separate the surface (degenerate drawing).
+  //
+  // First restricted to the SINGLE mesh shell the loop was actually drawn on
+  // (a whole-mesh flood fill ignoring the cut, seeded from one of the loop's
+  // own vertices). Real end-effector STLs routinely arrive as many
+  // disconnected shells — an overmold, a separate fillet patch, stray debris
+  // islands from a mesh export — that have nothing to do with the drawn
+  // patch; without this restriction those islands show up as extra "sides",
+  // and if the smallest one (picked as the default side) happens to be a
+  // tiny watertight island, unfolding throws "Closed surface selected" for a
+  // reason completely unrelated to what the user drew. Measured live: one
+  // real gripper-finger STL with 19 disconnected shells produced 15 "sides"
+  // from a single 4-point loop before this fix.
   const cycle = loopVertexPath.slice();
   if (cycle[0] !== cycle[cycle.length - 1]) cycle.push(cycle[0]);
   const blocked = new Set();
   for (let i = 0; i + 1 < cycle.length; i++) blocked.add(edgeKey(cycle[i], cycle[i + 1]));
 
-  const assigned = new Int32Array(model.triVerts.length).fill(-1);
+  const seedFace = firstFaceTouchingVertex(model, cycle[0]);
+  const shellFaces = seedFace >= 0 ? connectedFaces(model, seedFace) : null;
+  const candidates = shellFaces ? [...shellFaces] : model.triVerts.map((_, i) => i);
+
+  const assigned = new Map();
   const components = [];
-  for (let seed = 0; seed < model.triVerts.length; seed++) {
-    if (assigned[seed] !== -1) continue;
+  for (const seed of candidates) {
+    if (assigned.has(seed)) continue;
     const id = components.length;
     const triangles = new Set([seed]);
-    assigned[seed] = id;
+    assigned.set(seed, id);
     const stack = [seed];
     while (stack.length) {
       const t = stack.pop();
       for (const adjacency of model.triAdjacency[t] || []) {
         const n = adjacency.triangle;
-        if (assigned[n] !== -1) continue;
+        if (shellFaces && !shellFaces.has(n)) continue;
+        if (assigned.has(n)) continue;
         if (blocked.has(edgeKey(adjacency.va, adjacency.vb))) continue;
-        assigned[n] = id;
+        assigned.set(n, id);
         triangles.add(n);
         stack.push(n);
       }

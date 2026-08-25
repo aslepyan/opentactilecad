@@ -1019,18 +1019,27 @@ window.addEventListener("otc:face-outline", (e) => {
   updateTargetButtons();
   vertices = e.detail.outline.map((p) => [p[0], p[1]]);
   foldLines = (e.detail.foldLines || []).map(([a, b]) => [a.slice(), b.slice()]);
-  // The unfold flow rotates a deliberately-chosen lowest edge into the
-  // cable slot — a computed default, not an accident of drawing order.
-  cableEdgeConfirmed = true;
+  // The unfold flow rotates a deliberately-chosen lowest edge into the cable
+  // slot, so edge 0->1 is a sensible DEFAULT — but it's still a guess about
+  // where the user wants their cable to exit on the real part, not something
+  // they chose. Every other outline source (drawn, DXF) requires an explicit
+  // Set cable edge press before it counts as decided; STL unfolds silently
+  // skipped that and rendered the edge orange/confirmed immediately, which
+  // reads as "the app picked your connector location for you" — inconsistent
+  // with the rest of the app and reported as surprising. Same explicit-choice
+  // requirement here now: the computed edge is already selected as edge 0->1
+  // (still the natural first thing to confirm or override), just not
+  // pre-confirmed.
+  cableEdgeConfirmed = false;
   selected = null;
   angleReferenceEdge = null;
   fitViewTo(vertices);
   redraw();
   const faceText = e.detail.faceCount > 1 ? `${e.detail.faceCount} unfolded faces` : "STL face";
-  setOutlineInfo(`from ${faceText} · ${e.detail.w.toFixed(1)} × ${e.detail.h.toFixed(1)} mm`);
+  setOutlineInfo(`from ${faceText} · ${e.detail.w.toFixed(1)} × ${e.detail.h.toFixed(1)} mm · confirm the cable edge below`);
   syncDimensionFields();
   updateCadButtons();
-  genStatus.textContent = "Unfolded net loaded as the PCB outline — press Generate PCB.";
+  genStatus.textContent = "Unfolded net loaded — confirm the cable edge, then press Generate PCB.";
   showCableEdgeBanner();
 });
 window.addEventListener("otc:face-clear", () => {
