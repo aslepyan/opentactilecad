@@ -228,6 +228,10 @@ function loadArrayBuffer(buffer, filename) {
     return;
   }
 
+  // Any newly loaded STL invalidates a previously-known catalog path (dev
+  // example picker, below) — a fresh regular upload should fall back to the
+  // filename-only naming guess, not silently reuse the last example's path.
+  currentExamplePath = null;
   clearSelection(false);
   surfaceModel = null;
   loadedName = "";
@@ -1271,9 +1275,62 @@ window.addEventListener("otc:view-shown", () => {
 // unfolding, "Save as example" posts the full selection state + resulting
 // outline to /dev/capture-example, which writes JSON under
 // stl_examples/end_effectors/annotations/. The gallery replay consumes these.
-// The button only appears when the page is served by the local backend.
+// The button/picker only appear when the page is served by the local backend.
 let lastOutlineDetail = null;
 window.addEventListener("otc:face-outline", (e) => { lastOutlineDetail = e.detail; });
+
+// Set only when the currently loaded mesh came from the catalog picker below
+// (never guessed): the exact "robot/part.stl" path, known server-side, so
+// the annotation name can be generated with zero typing and zero ambiguity —
+// several parts share generic filenames (fingertip.stl exists under four
+// different robots) that the filename alone can't disambiguate.
+let currentExamplePath = null;
+
+const exampleSelect = document.getElementById("example-stl-select");
+const devExampleRow = document.getElementById("dev-example-row");
+if (exampleSelect && devExampleRow && API_BASE === "") {
+  devExampleRow.hidden = false;
+  fetch(`${API_BASE}/dev/example-stls`)
+    .then((r) => r.json())
+    .then(({ paths }) => {
+      const byRobot = new Map();
+      for (const path of paths || []) {
+        const slash = path.indexOf("/");
+        const robot = slash >= 0 ? path.slice(0, slash) : "(root)";
+        const part = slash >= 0 ? path.slice(slash + 1) : path;
+        if (!byRobot.has(robot)) byRobot.set(robot, []);
+        byRobot.get(robot).push({ path, part });
+      }
+      for (const [robot, parts] of [...byRobot].sort((a, b) => a[0].localeCompare(b[0]))) {
+        const group = document.createElement("optgroup");
+        group.label = robot;
+        for (const { path, part } of parts.sort((a, b) => a.part.localeCompare(b.part))) {
+          const opt = document.createElement("option");
+          opt.value = path;
+          opt.textContent = part;
+          group.appendChild(opt);
+        }
+        exampleSelect.appendChild(group);
+      }
+    })
+    .catch(() => { /* dev-only convenience; a failed listing just leaves the picker empty */ });
+
+  exampleSelect.addEventListener("change", async () => {
+    const path = exampleSelect.value;
+    if (!path) return;
+    infoEl.textContent = `Loading ${path}…`;
+    try {
+      const resp = await fetch(`${API_BASE}/dev/example-stl?path=${encodeURIComponent(path)}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buffer = await resp.arrayBuffer();
+      loadArrayBuffer(buffer, path);
+      currentExamplePath = path; // after loadArrayBuffer, which clears it
+    } catch (err) {
+      showError(`Could not load ${path}: ${err.message}`);
+    }
+  });
+}
+
 const captureBtn = document.getElementById("capture-example");
 if (captureBtn && API_BASE === "") {
   captureBtn.hidden = false;
@@ -1284,9 +1341,18 @@ if (captureBtn && API_BASE === "") {
       showError("Unfold a selection into the Board Outline canvas first.");
       return;
     }
-    const suggested = loadedName.replace(/\.stl$/i, "").replace(/[^A-Za-z0-9-_]+/g, "_");
-    const name = window.prompt("Annotation name:", suggested);
-    if (!name) return;
+    // Loaded via the catalog picker: the exact robot/part path names the
+    // annotation with no typing and no ambiguity. Anything else (a plain
+    // Upload STL of some other file) falls back to asking, since only the
+    // bare filename is known then.
+    let name;
+    if (currentExamplePath) {
+      name = currentExamplePath.replace(/\.stl$/i, "").replace(/[\\/]+/g, "_").replace(/[^A-Za-z0-9-_]+/g, "_");
+    } else {
+      const suggested = loadedName.replace(/\.stl$/i, "").replace(/[^A-Za-z0-9-_]+/g, "_");
+      name = window.prompt("Annotation name:", suggested);
+      if (!name) return;
+    }
     const payload = {
       // The shape only — the annotation is the surface selection and its
       // unfolded outline, not a connector choice. Whoever loads this example
