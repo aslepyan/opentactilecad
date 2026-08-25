@@ -4,10 +4,12 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import {
   buildSurfaceModel,
+  finalizeChainOutline,
   selectSmoothTrianglePatch,
   unfoldSelectedRegions,
   unfoldSelectedTriangles,
 } from "./face-select.js";
+import { API_BASE } from "./config.js";
 
 const container = document.getElementById("stl-container");
 const infoEl = document.getElementById("stl-info");
@@ -24,6 +26,7 @@ const autoSeamInput = document.getElementById("auto-seam");
 const setSeamBtn = document.getElementById("set-seam");
 const selectAllBtn = document.getElementById("select-all-faces");
 const unfoldBtn = document.getElementById("unfold-faces");
+const connectionsEl = document.getElementById("stl-connections");
 
 let scene, camera, renderer, controls, mesh, highlightMesh;
 let raycaster, downPt, surfaceModel;
@@ -41,6 +44,22 @@ let homePos = new THREE.Vector3();
 let initialized = false;
 let resizeObserver = null;
 let modelRadius = 1;
+
+// Disconnected selections are joined server-side by /unroll-mesh-chain
+// (straight-strut cuts between surfaces that don't share mesh edges). The
+// backend needs the raw STL bytes (its face indices match three.js's — see
+// NOTES.md's real-face-index fix), the selections in click order, and any
+// manually-picked corner pairs per connection.
+let stlBuffer = null;
+// frameObject() recenters the displayed geometry; backend coordinates stay
+// in the file's original frame, so 3D points it returns (corner-picker
+// markers) must be shifted by -meshOffset before rendering.
+const meshOffset = new THREE.Vector3();
+let clickOrder = [];        // [{faceIndex, regionId|null, triangles:Set}] in click order
+let chainOverrides = {};    // {connectionIndex: [[vA1,vB1],[vA2,vB2]]}
+let chainData = null;       // last /unroll-mesh-chain response
+let chainBusy = false;
+let cornerPick = null;      // {connIndex, pairs, pendingA, markerGroup, previewGroup}
 
 function init() {
   if (initialized) return;
@@ -100,7 +119,12 @@ function init() {
     if (!downPt) return;
     const moved = Math.hypot(event.clientX - downPt.x, event.clientY - downPt.y);
     downPt = null;
-    if (moved <= 5) selectFaceAt(event.clientX, event.clientY);
+    if (moved > 5) return;
+    if (cornerPick) {
+      pickCornerAt(event.clientX, event.clientY);
+      return;
+    }
+    selectFaceAt(event.clientX, event.clientY);
   });
   canvas.addEventListener("wheel", handleWheelZoom, { passive: false });
 
@@ -165,6 +189,7 @@ function frameObject(geometry) {
   const center = new THREE.Vector3();
   geometry.boundingBox.getSize(size);
   geometry.boundingBox.getCenter(center);
+  meshOffset.copy(center);
   geometry.translate(-center.x, -center.y, -center.z);
   geometry.computeBoundingBox();
 
@@ -199,6 +224,7 @@ function loadArrayBuffer(buffer, filename) {
   clearSelection(false);
   surfaceModel = null;
   loadedName = "";
+  stlBuffer = buffer;
   setSelectionControlsEnabled(false);
   if (mesh) {
     scene.remove(mesh);
@@ -271,10 +297,16 @@ function selectFaceAt(clientX, clientY) {
       if (alreadySelected) {
         for (const triangleId of patch.triangles) selectedTriangles.delete(triangleId);
         if (!selectedTriangles.has(rootTriangleId)) rootTriangleId = selectedTriangles.values().next().value ?? null;
+        for (const entry of clickOrder) {
+          for (const triangleId of patch.triangles) entry.triangles.delete(triangleId);
+        }
+        clickOrder = clickOrder.filter((entry) => entry.triangles.size);
       } else {
         for (const triangleId of patch.triangles) selectedTriangles.add(triangleId);
         if (rootTriangleId === null) rootTriangleId = patch.rootTriangleId;
+        clickOrder.push({ faceIndex: hits[0].faceIndex, regionId: null, triangles: new Set(patch.triangles) });
       }
+      invalidateChain();
       curvedSelectionMeta = patch;
       manualSeamTriangles = [];
       refreshHighlight();
@@ -292,6 +324,12 @@ function selectFaceAt(clientX, clientY) {
     curvedSelectionMeta = null;
     manualSeamTriangles = [];
     rootRegionId = regionId;
+    clickOrder = [{
+      faceIndex: hits[0].faceIndex,
+      regionId,
+      triangles: new Set(surfaceModel.regions[regionId].triangles),
+    }];
+    invalidateChain();
     refreshHighlight();
     unfoldCurrentSelection();
     return;
@@ -300,10 +338,17 @@ function selectFaceAt(clientX, clientY) {
   if (selectedRegions.has(regionId)) {
     selectedRegions.delete(regionId);
     if (rootRegionId === regionId) rootRegionId = selectedRegions.values().next().value ?? null;
+    clickOrder = clickOrder.filter((entry) => entry.regionId !== regionId);
   } else {
     selectedRegions.add(regionId);
     if (rootRegionId === null) rootRegionId = regionId;
+    clickOrder.push({
+      faceIndex: hits[0].faceIndex,
+      regionId,
+      triangles: new Set(surfaceModel.regions[regionId].triangles),
+    });
   }
+  invalidateChain();
   manualSeamTriangles = [];
   refreshHighlight();
   showCombinedSelectionStatus("Click Unfold selection when ready.");
@@ -311,9 +356,17 @@ function selectFaceAt(clientX, clientY) {
 
 function unfoldCurrentSelection() {
   if (!surfaceModel || (!selectedRegions.size && !selectedTriangles.size)) return;
+  const combinedTriangles = combinedSelectedTriangles();
+
+  // Selections that don't share mesh edges can't unfold as one client-side
+  // patch; the backend joins them with straight-strut cuts instead.
+  if (selectionComponentCount(combinedTriangles) > 1) {
+    unfoldViaBackendChain();
+    return;
+  }
+
   let result;
   try {
-    const combinedTriangles = combinedSelectedTriangles();
     result = selectedTriangles.size
       ? unfoldSelectedTriangles(surfaceModel, combinedTriangles, rootTriangleId ?? combinedTriangles.values().next().value, {
           autoSeam: autoSeamInput?.checked !== false,
@@ -347,6 +400,255 @@ function unfoldCurrentSelection() {
       warnings: result.warnings || [],
     },
   }));
+}
+
+// ---- Backend strut-chain for disconnected selections ----
+
+function selectionComponentCount(triangles) {
+  const remaining = new Set(triangles);
+  let components = 0;
+  while (remaining.size) {
+    components++;
+    const seed = remaining.values().next().value;
+    const stack = [seed];
+    remaining.delete(seed);
+    while (stack.length) {
+      const current = stack.pop();
+      for (const edge of surfaceModel.triAdjacency[current] || []) {
+        if (remaining.has(edge.triangle)) {
+          remaining.delete(edge.triangle);
+          stack.push(edge.triangle);
+        }
+      }
+    }
+  }
+  return components;
+}
+
+// The click history, trimmed to what's still selected. Later clicks own any
+// triangle two entries both grabbed, so every region is sent exactly once
+// and each entry's click face stays inside its own region.
+function orderedClickEntries() {
+  const selected = combinedSelectedTriangles();
+  const claimed = new Set();
+  const entries = [];
+  for (let i = clickOrder.length - 1; i >= 0; i--) {
+    const source = clickOrder[i];
+    const triangles = new Set();
+    for (const t of source.triangles) {
+      if (selected.has(t) && !claimed.has(t)) {
+        triangles.add(t);
+        claimed.add(t);
+      }
+    }
+    if (!triangles.size) continue;
+    const faceIndex = triangles.has(source.faceIndex)
+      ? source.faceIndex
+      : triangles.values().next().value;
+    entries.push({ faceIndex, triangles });
+  }
+  return entries.reverse();
+}
+
+async function unfoldViaBackendChain() {
+  if (chainBusy) return;
+  if (!stlBuffer) {
+    showError("The original STL bytes are unavailable — reload the file.");
+    return;
+  }
+  const entries = orderedClickEntries();
+  if (entries.length < 2) {
+    showError("Disconnected surfaces need separate clicks so their join order is known.");
+    return;
+  }
+
+  chainBusy = true;
+  unfoldBtn.disabled = true;
+  infoEl.textContent = `${loadedName} · joining ${entries.length} surfaces (straight cuts between non-touching ones)…`;
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([stlBuffer]), loadedName || "model.stl");
+    form.append("click_face_indices", entries.map((e) => e.faceIndex).join(","));
+    form.append("click_regions", JSON.stringify(entries.map((e) => [...e.triangles])));
+    form.append("connection_overrides", JSON.stringify(chainOverrides));
+
+    const response = await fetch(`${API_BASE}/unroll-mesh-chain`, { method: "POST", body: form });
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        detail = (await response.json()).detail || detail;
+      } catch {}
+      throw new Error(detail);
+    }
+    const data = await response.json();
+    chainData = data;
+
+    const finalized = finalizeChainOutline(data.outline);
+    window.dispatchEvent(new CustomEvent("otc:face-outline", {
+      detail: {
+        outline: finalized.outline,
+        foldLines: [],
+        w: finalized.w,
+        h: finalized.h,
+        faceCount: entries.length,
+        warnings: data.warnings || [],
+      },
+    }));
+
+    const strutCount = data.connections.filter((c) => c.needs_strut).length;
+    const worstDev = Math.max(0, ...(data.region_developability_mm || []));
+    const devNote = worstDev > 1.0 ? ` · surface distortion up to ${worstDev.toFixed(1)}mm — check warnings` : "";
+    infoEl.textContent =
+      `${loadedName} · joined ${entries.length} surfaces · ` +
+      `${finalized.w.toFixed(1)} × ${finalized.h.toFixed(1)} mm · ` +
+      `${strutCount} straight cut${strutCount === 1 ? "" : "s"}${devNote}`;
+    renderConnectionRows();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    chainBusy = false;
+    unfoldBtn.disabled = false;
+  }
+}
+
+function renderConnectionRows() {
+  if (!connectionsEl) return;
+  connectionsEl.innerHTML = "";
+  const struts = (chainData?.connections || [])
+    .map((connection, index) => ({ connection, index }))
+    .filter((item) => item.connection.needs_strut);
+  if (!struts.length) {
+    connectionsEl.hidden = true;
+    return;
+  }
+  for (const { connection, index } of struts) {
+    const row = document.createElement("div");
+    row.className = "conn-row warn";
+    const label = document.createElement("span");
+    const kind = chainOverrides[index] ? "your corners" : "auto corners";
+    label.innerHTML =
+      `Cut ${index + 1}&harr;${index + 2}: <span class="conn-kind">straight cut, ${kind}</span>`;
+    const fix = document.createElement("button");
+    fix.type = "button";
+    fix.className = "secondary";
+    fix.textContent = cornerPick?.connIndex === index ? "Cancel" : "Fix corners";
+    fix.addEventListener("click", () => {
+      if (cornerPick?.connIndex === index) {
+        endCornerPick("corner picking cancelled");
+      } else {
+        startCornerPick(index, connection);
+      }
+    });
+    row.appendChild(label);
+    row.appendChild(fix);
+    connectionsEl.appendChild(row);
+  }
+  connectionsEl.hidden = false;
+}
+
+const CORNER_GROUP_COLORS = [0xffd23e, 0x39c6d6, 0x9dff57, 0xff9d3e];
+
+function startCornerPick(connIndex, connection) {
+  endCornerPick();
+  const markerGroup = new THREE.Group();
+  const radius = Math.max(modelRadius * 0.018, 0.05);
+  const addMarker = (point, side) => {
+    const [vertexIndex, x, y, z, groupId] = point;
+    const color = side === "a"
+      ? CORNER_GROUP_COLORS[Math.trunc(groupId) % CORNER_GROUP_COLORS.length]
+      : 0xff5ea8;
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 12, 10),
+      new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 }),
+    );
+    marker.position.set(x - meshOffset.x, y - meshOffset.y, z - meshOffset.z);
+    marker.renderOrder = 10;
+    marker.userData = { side, vertexIndex: Math.trunc(vertexIndex) };
+    markerGroup.add(marker);
+  };
+  for (const point of connection.loop_a || []) addMarker(point, "a");
+  for (const point of connection.loop_b || []) addMarker(point, "b");
+  const previewGroup = new THREE.Group();
+  scene.add(markerGroup);
+  scene.add(previewGroup);
+  cornerPick = { connIndex, pairs: [], pendingA: null, markerGroup, previewGroup };
+  renderConnectionRows();
+  infoEl.textContent =
+    "Pick corner pair 1 of 2: click a marker on the existing chain (colored), then its partner on the new surface (pink).";
+}
+
+function endCornerPick(message = "") {
+  if (cornerPick) {
+    scene.remove(cornerPick.markerGroup);
+    scene.remove(cornerPick.previewGroup);
+    for (const group of [cornerPick.markerGroup, cornerPick.previewGroup]) {
+      group.traverse((obj) => {
+        obj.geometry?.dispose?.();
+        obj.material?.dispose?.();
+      });
+    }
+    cornerPick = null;
+    renderConnectionRows();
+  }
+  if (message) infoEl.textContent = `${loadedName} · ${message}`;
+}
+
+function pickCornerAt(clientX, clientY) {
+  if (!cornerPick) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(ndc, camera);
+  const expectSide = cornerPick.pendingA === null ? "a" : "b";
+  const hits = raycaster.intersectObjects(cornerPick.markerGroup.children, false)
+    .filter((hit) => hit.object.userData.side === expectSide);
+  if (!hits.length) {
+    infoEl.textContent = expectSide === "a"
+      ? "Click one of the colored markers on the existing chain first."
+      : "Now click a pink marker on the new surface.";
+    return;
+  }
+  const marker = hits[0].object;
+  marker.material.color.setHex(0xffffff);
+  if (expectSide === "a") {
+    cornerPick.pendingA = marker;
+    infoEl.textContent = "Now click its partner corner on the new surface (pink).";
+    return;
+  }
+
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      cornerPick.pendingA.position.clone(),
+      marker.position.clone(),
+    ]),
+    new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false }),
+  );
+  line.renderOrder = 11;
+  cornerPick.previewGroup.add(line);
+  cornerPick.pairs.push([cornerPick.pendingA.userData.vertexIndex, marker.userData.vertexIndex]);
+  cornerPick.pendingA = null;
+
+  if (cornerPick.pairs.length < 2) {
+    infoEl.textContent = "Pick corner pair 2 of 2: chain marker first, then its pink partner.";
+    return;
+  }
+  chainOverrides[cornerPick.connIndex] = cornerPick.pairs;
+  endCornerPick();
+  unfoldViaBackendChain();
+}
+
+// A selection edit makes the last chain result and its per-connection
+// overrides stale (connection indices shift with the click list).
+function invalidateChain() {
+  chainOverrides = {};
+  chainData = null;
+  endCornerPick();
+  if (connectionsEl) {
+    connectionsEl.hidden = true;
+    connectionsEl.innerHTML = "";
+  }
 }
 
 function refreshHighlight() {
@@ -441,6 +743,8 @@ function clearSelection(notify = true) {
   curvedSelectionMeta = null;
   seamPickMode = false;
   manualSeamTriangles = [];
+  clickOrder = [];
+  invalidateChain();
   setSeamBtn?.classList.remove("active");
   clearHighlight();
   clearFaceBtn.disabled = true;
@@ -557,6 +861,16 @@ selectAllBtn.addEventListener("click", () => {
   curvedSelectionMeta = null;
   manualSeamTriangles = [];
   seamPickMode = false;
+  // Largest-area first, so a disconnected model chains its biggest shell
+  // outward instead of starting from a sliver.
+  clickOrder = [...surfaceModel.regions]
+    .sort((a, b) => b.area - a.area)
+    .map((region) => ({
+      faceIndex: region.triangles[0],
+      regionId: region.id,
+      triangles: new Set(region.triangles),
+    }));
+  invalidateChain();
   setSeamBtn?.classList.remove("active");
   if (rootRegionId === null) {
     rootRegionId = surfaceModel.regions

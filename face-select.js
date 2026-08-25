@@ -1019,6 +1019,33 @@ function triangleLocalFrame(model, triangleId) {
   };
 }
 
+// Post-process an outline computed elsewhere (the backend's strut-joined
+// /unroll-mesh-chain result) the same way the client-side unfolds above
+// prepare theirs: center on the origin, orient counter-clockwise, drop
+// collinear points, and rotate the lowest boundary edge into the 0->1 cable
+// slot. Keeps the backend handoff consistent with the client paths without
+// duplicating their geometry helpers.
+export function finalizeChainOutline(points) {
+  if (!Array.isArray(points) || points.length < 3) {
+    throw new Error("The joined outline has fewer than 3 points.");
+  }
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  let outline = points.map(([x, y]) => [x - cx, y - cy]);
+  if (polyArea(outline) < 0) outline.reverse();
+  outline = simplifyCollinear(outline);
+  outline = rotateToBottomEdge(outline);
+  const outXs = outline.map((p) => p[0]);
+  const outYs = outline.map((p) => p[1]);
+  return {
+    outline,
+    w: Math.max(...outXs) - Math.min(...outXs),
+    h: Math.max(...outYs) - Math.min(...outYs),
+  };
+}
+
 // Compatibility wrapper for callers that still want the original one-face API.
 export function extractFlatFace(geometry, faceIndex, angleTolDeg = DEFAULT_ANGLE_TOL_DEG) {
   const model = buildSurfaceModel(geometry, angleTolDeg);
