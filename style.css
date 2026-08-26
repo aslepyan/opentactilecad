@@ -52,12 +52,14 @@ button.linklike:hover:not(:disabled) { color: var(--text); border-color: var(--l
 
 .app-view[hidden] { display: none; }
 
+/* No align-items: start — the default `stretch` lets the controls panel run
+   the full height of the row, so its box ends level with the PCB preview's
+   bottom instead of stopping wherever its own content happens to end. */
 .layout {
   display: grid;
   grid-template-columns: minmax(420px, 33vw) 1fr;
   gap: 14px;
   padding: 14px;
-  align-items: start;
 }
 
 /* ---- landing page ---- */
@@ -369,7 +371,11 @@ details.advanced .params { margin-top: 8px; }
   border-radius: 8px;
 }
 
-.controls { padding: 4px 14px 14px; max-height: calc(100vh - 90px); overflow-y: auto; }
+/* Stretched by the grid to the row's full height (see .layout). The old
+   viewport-height cap is gone: it made the panel scroll inside itself and
+   end well above the preview column's bottom edge. overflow-y stays for the
+   case where this column is the taller one. */
+.controls { padding: 4px 14px 14px; overflow-y: auto; }
 
 .group { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .group:last-child { border-bottom: none; }
