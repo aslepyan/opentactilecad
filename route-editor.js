@@ -601,6 +601,9 @@ export function createRouteEditor({
       previewEl.innerHTML = data.svg;
       bindSvgViewOnly();
       renderConnectorPreview(editData?.layout?.tail_extension?.path || tailPath);
+      // The edited export rebuilt the board, so the printable template that
+      // shipped with the original generate is now for the wrong outline.
+      window.otcPrintPdfUpdated?.(data.stats);
       visualPreviewOnly = true;
     }
     drcStale = false;

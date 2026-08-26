@@ -1557,8 +1557,7 @@ async function runGenerate(overrides = {}) {
   statsEl.innerHTML = "";
   connectorUpsizeEl.hidden = true;
   downloadBtn.disabled = true;
-  if (downloadPdfBtn) downloadPdfBtn.disabled = true;
-  if (pdfStatus) pdfStatus.textContent = "";
+  setPrintPdf(null);
   lastZipB64 = null;
   // Any previously built bump sheet belongs to the OLD board. Drop it before
   // the new one lands, so a stale STL can never be downloaded as if it fitted.
@@ -1584,7 +1583,7 @@ async function runGenerate(overrides = {}) {
     }
     lastZipB64 = data.zip_b64;
     downloadBtn.disabled = false;
-    if (downloadPdfBtn) downloadPdfBtn.disabled = !data.edit_data;
+    setPrintPdf(data.stats);
     window.otcBumpBoardReady?.(!!data.edit_data);
     renderStats(data.stats, data.drc);
     updateConnectorUpsizeControl(data.stats.connector_pos);
@@ -1654,50 +1653,49 @@ function mirrorDesign(axis) {
 cadMirrorHBtn?.addEventListener("click", () => mirrorDesign("h"));
 cadMirrorVBtn?.addEventListener("click", () => mirrorDesign("v"));
 
-window.otcGetEditData = () => routeEditor.getEditData();
-
 // ---- 1:1 printable PDF ----
-// A separate download from the ZIP: checking a shape against the real part is
-// something you do several times before you ever want Gerbers.
+// The PDF is built by the same call that builds the ZIP and arrives inside the
+// generate response, so this only hands over bytes it already has. It was
+// briefly a separate endpoint that rebuilt the layout from edit_data; that
+// reconstruction did not match what the export does — it skipped the tail
+// extension, post-route containment, follow-padding and connector shoulder —
+// and produced a plausible-looking template of the wrong shape. One artefact,
+// one producer.
 const downloadPdfBtn = document.getElementById("download-pdf");
 const pdfStatus = document.getElementById("pdf-status");
+let lastPdf = null;
 
-downloadPdfBtn?.addEventListener("click", async () => {
-  const editData = routeEditor.getEditData();
-  if (!editData) return;
-  downloadPdfBtn.disabled = true;
-  pdfStatus.textContent = "Building printable PDF…";
-  try {
-    const resp = await fetch(`${API_BASE}/print-pdf`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ edit_data: editData }),
-    });
-    if (!resp.ok) {
-      const detail = await resp.json().catch(() => ({}));
-      throw new Error(detail.detail || `HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-    const bin = atob(data.pdf_b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "printable_1to1.pdf";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    pdfStatus.textContent = data.pages > 1
-      ? `${data.board_w_mm} × ${data.board_h_mm} mm — tiled over ${data.pages} sheets. Print at 100%.`
-      : `${data.board_w_mm} × ${data.board_h_mm} mm on one sheet. Print at 100% (Actual size).`;
-  } catch (err) {
-    pdfStatus.innerHTML = `<span class="error">PDF failed: ${err.message}</span>`;
-  } finally {
-    downloadPdfBtn.disabled = false;
-  }
+function setPrintPdf(stats) {
+  lastPdf = stats?.print_pdf || null;
+  if (downloadPdfBtn) downloadPdfBtn.disabled = !lastPdf;
+  if (!pdfStatus) return;
+  pdfStatus.textContent = lastPdf
+    ? (lastPdf.pages > 1
+        ? `Printable: ${lastPdf.board_w_mm} × ${lastPdf.board_h_mm} mm over ${lastPdf.pages} sheets, at 100%.`
+        : `Printable: ${lastPdf.board_w_mm} × ${lastPdf.board_h_mm} mm on one sheet, at 100%.`)
+    : "";
+}
+
+// Route edits rebuild the board, so the template that shipped with the
+// original generate is then for the wrong outline.
+window.otcPrintPdfUpdated = (stats) => setPrintPdf(stats);
+
+downloadPdfBtn?.addEventListener("click", () => {
+  if (!lastPdf) return;
+  const bin = atob(lastPdf.b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "printable_1to1.pdf";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 });
+
+window.otcGetEditData = () => routeEditor.getEditData();
 
 document.getElementById("generate").addEventListener("click", () => runGenerate());
 
