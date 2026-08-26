@@ -53,6 +53,8 @@ const cadUndoBtn = document.getElementById("cad-undo");
 const cadRedoBtn = document.getElementById("cad-redo");
 const cadDeleteBtn = document.getElementById("cad-delete");
 const cadSetCableBtn = document.getElementById("cad-set-cable");
+const cadMirrorHBtn = document.getElementById("cad-mirror-h");
+const cadMirrorVBtn = document.getElementById("cad-mirror-v");
 const cadSetAngleRefBtn = document.getElementById("cad-set-angle-ref");
 const cadZoomOutBtn = document.getElementById("cad-zoom-out");
 const cadZoomInBtn = document.getElementById("cad-zoom-in");
@@ -625,6 +627,9 @@ function updateCadButtons() {
   cadDeleteBtn.disabled = !selected;
   cadSetCableBtn.disabled = editTarget !== "outline" || selected?.type !== "edge";
   cadSetAngleRefBtn.disabled = selected?.type !== "edge";
+  const canMirror = vertices.length >= 3;
+  if (cadMirrorHBtn) cadMirrorHBtn.disabled = !canMirror;
+  if (cadMirrorVBtn) cadMirrorVBtn.disabled = !canMirror;
   if (!validEdgeIndex(angleReferenceEdge)) angleReferenceEdge = null;
   updateFillToggleAvailability();
 }
@@ -1552,6 +1557,8 @@ async function runGenerate(overrides = {}) {
   statsEl.innerHTML = "";
   connectorUpsizeEl.hidden = true;
   downloadBtn.disabled = true;
+  if (downloadPdfBtn) downloadPdfBtn.disabled = true;
+  if (pdfStatus) pdfStatus.textContent = "";
   lastZipB64 = null;
   // Any previously built bump sheet belongs to the OLD board. Drop it before
   // the new one lands, so a stale STL can never be downloaded as if it fitted.
@@ -1577,6 +1584,7 @@ async function runGenerate(overrides = {}) {
     }
     lastZipB64 = data.zip_b64;
     downloadBtn.disabled = false;
+    if (downloadPdfBtn) downloadPdfBtn.disabled = !data.edit_data;
     window.otcBumpBoardReady?.(!!data.edit_data);
     renderStats(data.stats, data.drc);
     updateConnectorUpsizeControl(data.stats.connector_pos);
@@ -1596,7 +1604,100 @@ async function runGenerate(overrides = {}) {
 
 // The bump sheet is built from the board's edit_data, so bump-sheet.js reads
 // it through here instead of holding its own copy that could go stale.
+
+// ---- mirror ----
+// Flips the whole design in place: outline, sensorize zone and any fold lines
+// together, about the OUTLINE's bounding-box centre. Mirroring only the piece
+// you happen to be editing would slide the sensorize zone off the board.
+//
+// The winding fix is the subtle part. Mirroring reverses a polygon's
+// orientation, and the pipeline requires counter-clockwise: geometry.ensure_ccw
+// pins vertex 0 and reverses the rest, so handing it a clockwise polygon does
+// not merely flip the winding back -- it silently swaps the cable edge for the
+// other edge meeting vertex 0, and the board generates fine with its tail in
+// the wrong place. Reversing the cycle while rotating it to start at the old
+// vertex 1 restores counter-clockwise AND keeps edge 0->1 the same physical
+// edge, just traversed the other way, so the cable edge survives the flip.
+function mirrorCycleCCW(pts, flip) {
+  const m = pts.map(flip);
+  if (m.length < 3) return m;
+  return [m[1], m[0], ...m.slice(2).reverse()];
+}
+
+function mirrorDesign(axis) {
+  if (vertices.length < 3) return;
+  const xs = vertices.map((v) => v[0]);
+  const ys = vertices.map((v) => v[1]);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const flip = axis === "h"
+    ? (p) => [2 * cx - p[0], p[1]]
+    : (p) => [p[0], 2 * cy - p[1]];
+
+  pushUndo();
+  vertices = mirrorCycleCCW(vertices, flip);
+  // The fill zone carries no cable edge, so a plain reverse keeps it CCW.
+  fillVertices = fillVertices.length >= 3
+    ? fillVertices.map(flip).reverse()
+    : fillVertices.map(flip);
+  foldLines = foldLines.map(([a, b]) => [flip(a), flip(b)]);
+  selected = null;
+  previewPoint = null;
+  arcState = null;
+  angleReferenceEdge = null;
+  redraw();
+  setOutlineInfo(axis === "h" ? "mirrored left-right" : "mirrored top-bottom");
+  updateCadButtons();
+  syncDimensionFields();
+}
+
+cadMirrorHBtn?.addEventListener("click", () => mirrorDesign("h"));
+cadMirrorVBtn?.addEventListener("click", () => mirrorDesign("v"));
+
 window.otcGetEditData = () => routeEditor.getEditData();
+
+// ---- 1:1 printable PDF ----
+// A separate download from the ZIP: checking a shape against the real part is
+// something you do several times before you ever want Gerbers.
+const downloadPdfBtn = document.getElementById("download-pdf");
+const pdfStatus = document.getElementById("pdf-status");
+
+downloadPdfBtn?.addEventListener("click", async () => {
+  const editData = routeEditor.getEditData();
+  if (!editData) return;
+  downloadPdfBtn.disabled = true;
+  pdfStatus.textContent = "Building printable PDF…";
+  try {
+    const resp = await fetch(`${API_BASE}/print-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edit_data: editData }),
+    });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const bin = atob(data.pdf_b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "printable_1to1.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    pdfStatus.textContent = data.pages > 1
+      ? `${data.board_w_mm} × ${data.board_h_mm} mm — tiled over ${data.pages} sheets. Print at 100%.`
+      : `${data.board_w_mm} × ${data.board_h_mm} mm on one sheet. Print at 100% (Actual size).`;
+  } catch (err) {
+    pdfStatus.innerHTML = `<span class="error">PDF failed: ${err.message}</span>`;
+  } finally {
+    downloadPdfBtn.disabled = false;
+  }
+});
 
 document.getElementById("generate").addEventListener("click", () => runGenerate());
 

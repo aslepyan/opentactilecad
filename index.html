@@ -397,6 +397,10 @@
               <button id="cad-delete" type="button" class="secondary" disabled>Delete</button>
               <button id="cad-set-angle-ref" type="button" class="secondary" disabled>Set angle ref</button>
               <button id="cad-set-cable" type="button" class="secondary" disabled>Set cable edge</button>
+              <button id="cad-mirror-h" type="button" class="secondary" disabled
+                      title="Flip the design left-to-right, in place. Use it to turn a left-hand part into the matching right-hand one. The cable edge stays the same edge.">Mirror &#8646;</button>
+              <button id="cad-mirror-v" type="button" class="secondary" disabled
+                      title="Flip the design top-to-bottom, in place. The cable edge stays the same edge.">Mirror &#8645;</button>
               <button id="cad-zoom-out" type="button" class="secondary" title="Zoom out">−</button>
               <button id="cad-zoom-in" type="button" class="secondary" title="Zoom in">+</button>
               <button id="cad-fit" type="button" class="secondary" title="Fit outline to view">Fit</button>
@@ -586,6 +590,9 @@
         </div>
 
         <div class="panel download-bar">
+          <span id="pdf-status" class="mini download-bar__status"></span>
+          <button id="download-pdf" type="button" class="secondary" disabled
+                  title="A 1:1 printable outline. Print it at 100%, cut it out and hold it against the real part to check the fit before ordering boards.">Download printable PDF</button>
           <button id="download" type="button" class="primary" disabled>Download ZIP</button>
         </div>
       </section>
@@ -601,6 +608,7 @@
         <a href="#" data-help-target="help-fill">Sensorize zone</a>
         <a href="#" data-help-target="help-board-sizing">Parameters glossary</a>
         <a href="#" data-help-target="help-routes">Route editing</a>
+        <a href="#" data-help-target="help-mirror">Mirroring a design</a>
         <a href="#" data-help-target="help-export">Exporting</a>
         <a href="#" data-help-target="help-bumps">Shear-sensing bumps</a>
         <a href="#" data-help-target="help-faq">FAQ / troubleshooting</a>
@@ -616,6 +624,14 @@
           <h3>STL</h3>
           <p>Upload a 3D model, then click a face (or several connected faces, or a smoothly curved patch) to select the surface your sensor will cover — or use <strong>Draw patch</strong> to click points directly on the surface and outline your sensor by hand, letting the app smooth away texture like tread patterns. <strong>Unfold selection</strong> flattens the result into a 2D outline using a true-scale unfolding algorithm — like unwrapping a physical piece of paper from the part. The result lands in the same Board Outline canvas, where you can still hand-edit it. Like a DXF import, an unfolded outline has no inherent cable edge — confirm or change it with <strong>Set cable edge</strong> once it loads.</p>
           <p>If your selection spans surfaces that don't share a mesh edge (say, a fingertip's front face plus its two sides), the button changes to <strong>Join surfaces…</strong> and the viewer walks you through the join, one cut at a time: it shows numbered marker dots along each surface's boundary, and you click <strong>two matching corner pairs</strong> — "this corner attaches to that one" — for each cut. Only after every cut is resolved does the 2D preview appear, with <strong>Use this shape</strong> handing it to the outline canvas. Picking the corners yourself is deliberate: you can see the real part, so you know which corners truly touch.</p>
+        </section>
+
+        <section id="help-mirror" class="panel help-section">
+          <h2>Mirroring a design</h2>
+          <p>Grippers come in pairs. Once you have a sensor for the left jaw, <strong>Mirror &#8646;</strong> in the drawing toolbar flips it into the right-hand version &mdash; and <strong>Mirror &#8645;</strong> flips it top-to-bottom.</p>
+          <p>The flip happens <em>in place</em>: the shape keeps its exact size and position, so every dimension you typed stays what it was. It moves the whole design together &mdash; outline, sensorize zone and any fold lines &mdash; so they do not come apart.</p>
+          <p><strong>Your cable edge survives the flip.</strong> It stays the same physical edge of the shape, just on the other side, so you do not have to set it again. (Under the hood a mirror reverses which way a shape winds, which would otherwise move the connector to a different edge without any visible sign; the flip corrects for that.)</p>
+          <p>Mirror is undoable like any other edit, and mirroring twice returns you exactly where you started.</p>
         </section>
 
         <section id="help-fill" class="panel help-section">
@@ -689,6 +705,11 @@
             <li>A JSON manifest describing pixel placements, useful for driving the sensor from a microcontroller.</li>
           </ul>
           <p>The connector is auto-selected as the smallest 0.5mm-pitch FPC connector (20 up to 100 positions) that fits your sensor's row and column count. If you need a specific larger size — say, to slot into an existing readout board — a "Need a bigger connector?" control appears next to the stats after Generate, offering larger sizes up to 100-pos.</p>
+          <h3>The printable 1:1 PDF</h3>
+          <p>Both the ZIP (<code>printable_1to1.pdf</code>) and the <strong>Download printable PDF</strong> button next to it give you a full-size paper template of your board. Print it, cut it out, and hold it against the real part <em>before</em> you order boards &mdash; it takes a minute and catches a wrong dimension that would otherwise arrive as a batch of useless PCBs.</p>
+          <p>It draws the board's <strong>real manufactured edge</strong>, including the cable tail and connector &mdash; not the shape you drew, which is smaller. The sensor grid is printed faintly inside so you can see where the sensing spots land.</p>
+          <p><strong>Print it at 100%.</strong> Print dialogs default to "Fit to page" or "Shrink to printable area", which quietly resizes the sheet by a few percent and makes the template wrong. Every page carries a 100&nbsp;mm ruler: measure it with a real ruler after printing. If it is not exactly 100&nbsp;mm, reprint at <em>Actual size</em>. The sheet size used (A4 or A3) is printed at the top &mdash; pick that size in your print dialog.</p>
+          <p>Boards too big for one sheet are split across several, with a dashed overlap line on each: trim to the dashed line and butt the next sheet against it.</p>
           <p>A bigger connector body can be wider than the cable/tail running into it, which puts a step in the board's cut outline. <strong>Shoulder fillet</strong>, next to that control, rounds that step — both the outward corners at the connector tip and the two inward notches where the tail meets the shoulder — instead of leaving sharp 90° corners that concentrate stress in a flex PCB. Set it to 0 for square corners.</p>
         </section>
 
