@@ -277,14 +277,71 @@ function loadArrayBuffer(buffer, filename) {
     `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} mm${warning}`;
 }
 
-// Replays a saved annotation's highlight (not its selection state or unfold
-// logic — just which triangles were picked) onto the currently loaded mesh:
-// used by the gallery-thumbnail generator. Every selection mode records its
-// picked triangles per click in click_order, including a chained multi-
-// surface join (several disconnected clicks + corner overrides) — the union
-// of every click's triangles is exactly what should render as highlighted,
-// regardless of how those clicks were later joined into one 2D outline, so
-// this needs none of the unfold/chain machinery to reproduce the picture.
+// Point the camera at the selected patch from ITS OWN side, at `distanceScale`
+// of the app's standard framing distance.
+//
+// A patch on the far side of the part is occluded by the part itself from any
+// fixed viewing angle — confirmed live twice: the Yubi pad's selection sits
+// entirely in -x while the default camera sits at +x, so its highlight
+// rendered perfectly and stayed invisible behind the mesh, both in gallery
+// thumbnails and when opening the example in the viewer. Averaging the
+// selected triangles' normals gives the direction the patch faces.
+//
+// Scaling the app's own frameObject distance (homePos) rather than deriving
+// one from modelRadius matters for elongated parts: their bounding sphere is
+// dominated by the long axis, so a radius-derived "tight" distance can land
+// inside the mesh (seen as an unrecognizable close-up sliver).
+function aimCameraAtSelection(triangles, distanceScale) {
+  const avgNormal = new THREE.Vector3();
+  for (const t of triangles) avgNormal.add(surfaceModel.triNormals[t]);
+  // A wrap-around selection can average to ~zero (normals cancel); the
+  // default angle is as good as any there, so keep it.
+  const dir = avgNormal.lengthSq() > 1e-6
+    ? avgNormal.normalize()
+    : camera.position.clone().sub(controls.target).normalize();
+  // Tilt slightly off the pure face-on normal so the part still reads as a
+  // 3D object rather than a flat silhouette.
+  dir.add(new THREE.Vector3(0, 0.35, 0)).normalize();
+  camera.position.copy(controls.target).add(dir.multiplyScalar(homePos.length() * distanceScale));
+  camera.lookAt(controls.target);
+  camera.updateMatrixWorld();
+  controls.update();
+}
+
+// Landing-gallery handoff: fetch a catalog STL, show it in the normal 3D
+// viewer, and highlight the surface this example was built from — so opening
+// an example keeps the part visible and rotatable while its outline is being
+// turned into a board, instead of dropping the user into a bare 2D canvas.
+// The outline itself is handed over separately (and instantly, from the
+// manifest), so a slow or unreachable backend costs only the 3D preview, not
+// the example.
+window.otcShowExampleInViewer = async function (stlPath, triangles, label) {
+  init();
+  infoEl.textContent = `Loading ${label}…`;
+  try {
+    const resp = await fetch(`${API_BASE}/example-stl?path=${encodeURIComponent(stlPath)}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    loadArrayBuffer(await resp.arrayBuffer(), stlPath);
+    if (!surfaceModel) return;           // loadArrayBuffer already reported why
+    selectedTriangles = new Set(triangles || []);
+    selectedRegions = new Set();
+    rootTriangleId = selectedTriangles.values().next().value ?? null;
+    refreshHighlight();
+    // Open facing the highlighted surface (full framing distance — this is
+    // the interactive viewer, not a thumbnail, so leave room to orbit).
+    aimCameraAtSelection(selectedTriangles, 1.0);
+    // The example arrives already unfolded; this viewer is for context and
+    // inspection, so don't invite a second unfold of the same selection.
+    unfoldBtn.disabled = true;
+    infoEl.textContent =
+      `${label} · ${selectedTriangles.size.toLocaleString()} triangles selected · ` +
+      `drag to rotate · already unfolded into the board outline`;
+  } catch (err) {
+    infoEl.textContent =
+      `${label}: 3D preview unavailable (${err.message}) — the board outline loaded fine.`;
+  }
+};
+
 window.__otc_debug = () => ({
   hasHighlight: !!highlightMesh,
   vertexCount: highlightMesh ? highlightMesh.geometry.attributes.position.count : 0,
@@ -298,6 +355,13 @@ window.__otc_debug = () => ({
 // without going through the file-input UI at all.
 window.__otcLoadForThumb = loadArrayBuffer;
 
+// Replays a saved annotation's highlight (just which triangles were picked —
+// not its selection state or unfold logic) onto the currently loaded mesh:
+// used by the gallery-thumbnail generator. Every selection mode records its
+// picked triangles per click in click_order, including a chained multi-surface
+// join, so the union of every click's triangles is exactly what should render
+// as highlighted regardless of how those clicks were later joined into one 2D
+// outline — no unfold/chain machinery needed to reproduce the picture.
 window.otcReplayAnnotationHighlight = function (annotation, { thumbnailFraming = false } = {}) {
   if (!surfaceModel) throw new Error("Load the STL first.");
   const triangles = new Set();
@@ -308,44 +372,13 @@ window.otcReplayAnnotationHighlight = function (annotation, { thumbnailFraming =
   selectedRegions = new Set();
   refreshHighlight();
   if (thumbnailFraming) {
-    // The interactive default (frameObject) leaves generous orbit/pan room —
-    // deliberately conservative for live use, but reads as "tiny object lost
-    // in a big dark grid" in a small gallery card. Same viewing direction
-    // (frameObject's own isometric-ish homePos angle), just pulled in tight,
-    // with the grid/axes hidden — this hook exists only for the thumbnail
-    // generator's disposable tab, so it doesn't need to restore either.
+    // The interactive default leaves generous orbit/pan room — deliberately
+    // conservative for live use, but reads as "tiny object lost in a big dark
+    // grid" in a small gallery card. This hook only ever runs in the
+    // thumbnail generator's disposable tab, so it never restores either.
     gridHelper.visible = false;
     axesHelper.visible = false;
-    // Look at the selected patch from ITS OWN side, not from the viewer's
-    // fixed default angle: the whole point of the thumbnail is showing which
-    // faces were picked, and a patch on the far side of the part is simply
-    // occluded by the part itself from any fixed direction (confirmed live —
-    // the Yubi pad's selection sits entirely in -x while the default camera
-    // sits at +x, so the highlight rendered perfectly and was hidden behind
-    // the mesh the whole time). Average the selected triangles' normals to
-    // get the direction the patch faces, then back the camera off along it.
-    const avgNormal = new THREE.Vector3();
-    for (const t of triangles) avgNormal.add(surfaceModel.triNormals[t]);
-    // A wrap-around selection can average to ~zero (normals cancel); the
-    // default angle is as good as any there, so keep it.
-    const dir = avgNormal.lengthSq() > 1e-6
-      ? avgNormal.normalize()
-      : camera.position.clone().sub(controls.target).normalize();
-    // Tilt slightly off the pure face-on normal so the part still reads as
-    // a 3D object rather than a flat silhouette.
-    dir.add(new THREE.Vector3(0, 0.35, 0)).normalize();
-    // Scale DOWN the app's own already-safe framing distance (homePos, from
-    // frameObject) rather than recomputing one from modelRadius directly —
-    // a fixed multiple of radius is only safe for roughly ball-shaped parts.
-    // For an elongated part (e.g. a 99mm jaw with a ~20-48mm cross-section)
-    // the bounding-sphere radius is dominated by the long axis, so a "tight"
-    // distance derived straight from it can end up literally inside the
-    // mesh — confirmed live as an unrecognizable close-up sliver.
-    const tight = homePos.length() * 0.62;
-    camera.position.copy(controls.target).add(dir.multiplyScalar(tight));
-    camera.lookAt(controls.target);
-    camera.updateMatrixWorld();
-    controls.update();
+    aimCameraAtSelection(triangles, 0.62);
   }
 };
 
@@ -1365,7 +1398,7 @@ const exampleSelect = document.getElementById("example-stl-select");
 const devExampleRow = document.getElementById("dev-example-row");
 if (exampleSelect && devExampleRow && API_BASE === "") {
   devExampleRow.hidden = false;
-  fetch(`${API_BASE}/dev/example-stls`)
+  fetch(`${API_BASE}/example-stls`)
     .then((r) => r.json())
     .then(({ paths }) => {
       // Server paths are relative to stl_examples/ (so its handful of older
@@ -1402,7 +1435,7 @@ if (exampleSelect && devExampleRow && API_BASE === "") {
     const logical = path.replace(/^end_effectors\//, "");
     infoEl.textContent = `Loading ${logical}…`;
     try {
-      const resp = await fetch(`${API_BASE}/dev/example-stl?path=${encodeURIComponent(path)}`);
+      const resp = await fetch(`${API_BASE}/example-stl?path=${encodeURIComponent(path)}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buffer = await resp.arrayBuffer();
       loadArrayBuffer(buffer, logical);

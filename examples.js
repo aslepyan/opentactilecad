@@ -160,17 +160,24 @@ const stlGalleryEl = document.getElementById("landing-stl-examples");
 const stlFilterEl = document.getElementById("stl-example-filter");
 
 function loadStlExample(example) {
-  applyModeVisibility("draw");
+  const label = `${example.robot} — ${example.part}`;
+  // STL mode, not draw mode: the part stays on screen in the normal 3D
+  // viewer — rotatable, with its sensor surface highlighted — so the context
+  // of what is being designed for survives the jump from gallery to editor.
+  applyModeVisibility("stl");
   showView("tool");
+  // Outline first and synchronously (it is already in the manifest), so the
+  // board is usable regardless of what the 3D fetch does.
   window.dispatchEvent(new CustomEvent("otc:load-example", {
     detail: {
-      label: `${example.robot} — ${example.part}`,
+      label,
       outline: example.outline,
       params: BASELINE_PARAMS,
       requireCableEdge: true,
       autoGenerate: false,
     },
   }));
+  window.otcShowExampleInViewer?.(example.stl_name, example.triangles, label);
 }
 
 if (stlGalleryEl) {
