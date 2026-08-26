@@ -5512,6 +5512,41 @@
    "mesh": "example-meshes/Wrist_Roll_08c.stl"
   },
   {
+   "id": "umi_soft_gripper_finger",
+   "robot": "UMI Gripper",
+   "part": "Soft gripper finger",
+   "thumbnail": "example-thumbnails/umi_soft_gripper_finger.png",
+   "outline": [
+    [
+     -12.9,
+     -59.6823
+    ],
+    [
+     12.9,
+     -59.6823
+    ],
+    [
+     12.9,
+     59.6823
+    ],
+    [
+     -12.9,
+     59.6823
+    ]
+   ],
+   "size_mm": [
+    25.8,
+    119.4
+   ],
+   "selection": "one flat face",
+   "stl_name": "umi/soft_gripper_finger.stl",
+   "triangles": [
+    728,
+    729
+   ],
+   "mesh": "example-meshes/umi_soft_gripper_finger.stl"
+  },
+  {
    "id": "yale_openhand_model_o_distal",
    "robot": "Yale OpenHand",
    "part": "Model o distal",
