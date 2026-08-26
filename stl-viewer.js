@@ -315,13 +315,21 @@ function aimCameraAtSelection(triangles, distanceScale) {
 // The outline itself is handed over separately (and instantly, from the
 // manifest), so a slow or unreachable backend costs only the 3D preview, not
 // the example.
-window.otcShowExampleInViewer = async function (stlPath, triangles, label) {
+window.otcShowExampleInViewer = async function (meshUrl, triangles, label) {
   init();
   infoEl.textContent = `Loading ${label}…`;
   try {
-    const resp = await fetch(`${API_BASE}/example-stl?path=${encodeURIComponent(stlPath)}`);
+    // A same-origin STATIC file (frontend/example-meshes/), not a backend
+    // endpoint: the curated originals are print-quality — 17.5MB in total,
+    // up to 87k triangles — and live in the backend repo, which the Render
+    // image does not even contain (its Docker build context is backend/
+    // alone, so /example-stl 404'd for every part on the deployed site).
+    // These previews keep the selected faces at full resolution and decimate
+    // only the rest, which is 5.8MB for all 32 and identical on GitHub Pages
+    // and locally, with no backend round trip or cold start.
+    const resp = await fetch(meshUrl);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    loadArrayBuffer(await resp.arrayBuffer(), stlPath);
+    loadArrayBuffer(await resp.arrayBuffer(), meshUrl);
     if (!surfaceModel) return;           // loadArrayBuffer already reported why
     selectedTriangles = new Set(triangles || []);
     selectedRegions = new Set();

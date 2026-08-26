@@ -177,7 +177,7 @@ function loadStlExample(example) {
       autoGenerate: false,
     },
   }));
-  window.otcShowExampleInViewer?.(example.stl_name, example.triangles, label);
+  window.otcShowExampleInViewer?.(example.mesh, example.triangles, label);
 }
 
 if (stlGalleryEl) {
