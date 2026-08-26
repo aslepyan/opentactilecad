@@ -1553,6 +1553,9 @@ async function runGenerate(overrides = {}) {
   connectorUpsizeEl.hidden = true;
   downloadBtn.disabled = true;
   lastZipB64 = null;
+  // Any previously built bump sheet belongs to the OLD board. Drop it before
+  // the new one lands, so a stale STL can never be downloaded as if it fitted.
+  window.otcBumpInvalidate?.();
   try {
     const resp = await fetch(`${API_BASE}/generate`, {
       method: "POST",
@@ -1574,6 +1577,7 @@ async function runGenerate(overrides = {}) {
     }
     lastZipB64 = data.zip_b64;
     downloadBtn.disabled = false;
+    window.otcBumpBoardReady?.(!!data.edit_data);
     renderStats(data.stats, data.drc);
     updateConnectorUpsizeControl(data.stats.connector_pos);
     tailExtensionPromptDismissed = false;
@@ -1589,6 +1593,10 @@ async function runGenerate(overrides = {}) {
     generateInFlight = false;
   }
 }
+
+// The bump sheet is built from the board's edit_data, so bump-sheet.js reads
+// it through here instead of holding its own copy that could go stale.
+window.otcGetEditData = () => routeEditor.getEditData();
 
 document.getElementById("generate").addEventListener("click", () => runGenerate());
 
