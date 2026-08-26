@@ -133,6 +133,49 @@ button.linklike:hover:not(:disabled) { color: var(--text); border-color: var(--l
 .example-card__foot button { flex: none; white-space: nowrap; }
 .example-card__facts { font-size: 11px; color: var(--muted); line-height: 1.35; }
 
+/* ---- landing: real robot end-effector gallery ---- */
+.stl-example-filter { display: flex; justify-content: center; margin-bottom: 14px; }
+.stl-example-filter label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted);
+}
+.stl-example-filter select {
+  font: inherit;
+  padding: 5px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+}
+.landing-stl-examples {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.stl-example-card {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stl-example-card[hidden] { display: none; }
+.stl-example-card__thumb {
+  background: #0c1116;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stl-example-card__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.stl-example-card__body { flex: 1; }
+.stl-example-card h3 { font-size: 13px; margin: 0 0 2px; }
+.stl-example-card__part { font-size: 12.5px; color: var(--text); margin: 0 0 3px; }
+.stl-example-card__meta { font-size: 11px; color: var(--muted); margin: 0; line-height: 1.35; }
+.stl-example-card button { width: 100%; }
+
 /* ---- landing: local install + Claude Code guides ---- */
 .landing-guides {
   display: grid;
@@ -804,6 +847,7 @@ button.mode-button.active {
   .cad-fields { grid-template-columns: 1fr 1fr; }
   .landing-modes { grid-template-columns: 1fr; }
   .landing-examples { grid-template-columns: 1fr; }
+  .landing-stl-examples { grid-template-columns: repeat(2, 1fr); }
   .landing-guides { grid-template-columns: 1fr; }
   .landing-glossary dl { grid-template-columns: 1fr; }
   .help { grid-template-columns: 1fr; }

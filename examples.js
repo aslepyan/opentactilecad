@@ -143,3 +143,73 @@ if (galleryEl) {
     galleryEl.appendChild(card);
   }
 }
+
+// ---- Real robot end-effector gallery -------------------------------------
+// Each card is a surface of an actual robot part, selected by hand in the STL
+// tool and saved as an annotation (stl_examples/end_effectors/annotations/);
+// stl-examples.json carries the resulting unfolded 2D outline plus a
+// thumbnail rendered from the 3D model with the chosen faces highlighted.
+//
+// Clicking loads the stored outline straight into the board editor — the
+// unfold already happened when the example was curated, so there's no STL
+// download, no mesh analysis, and no re-unfolding at click time. The cable
+// edge is deliberately NOT preset: which edge the connector should exit is a
+// decision about the reader's own build, so they choose it exactly as they
+// would for a DXF import or a hand-drawn outline.
+const stlGalleryEl = document.getElementById("landing-stl-examples");
+const stlFilterEl = document.getElementById("stl-example-filter");
+
+function loadStlExample(example) {
+  applyModeVisibility("draw");
+  showView("tool");
+  window.dispatchEvent(new CustomEvent("otc:load-example", {
+    detail: {
+      label: `${example.robot} — ${example.part}`,
+      outline: example.outline,
+      params: BASELINE_PARAMS,
+      requireCableEdge: true,
+      autoGenerate: false,
+    },
+  }));
+}
+
+if (stlGalleryEl) {
+  fetch("stl-examples.json")
+    .then((r) => r.json())
+    .then(({ examples }) => {
+      if (!examples || !examples.length) return;
+      const robots = [...new Set(examples.map((e) => e.robot))].sort();
+      if (stlFilterEl) {
+        stlFilterEl.innerHTML =
+          `<option value="">All robots (${examples.length} surfaces)</option>` +
+          robots.map((r) => `<option value="${r}">${r}</option>`).join("");
+        stlFilterEl.addEventListener("change", () => {
+          const want = stlFilterEl.value;
+          for (const card of stlGalleryEl.children) {
+            card.hidden = Boolean(want) && card.dataset.robot !== want;
+          }
+        });
+      }
+      for (const example of examples) {
+        const card = document.createElement("article");
+        card.className = "panel stl-example-card";
+        card.dataset.robot = example.robot;
+        card.innerHTML =
+          `<div class="stl-example-card__thumb">` +
+          `<img src="${example.thumbnail}" alt="3D model of the ${example.robot} ${example.part}, with the sensor surface highlighted" loading="lazy" />` +
+          `</div>` +
+          `<div class="stl-example-card__body">` +
+          `<h3>${example.robot}</h3>` +
+          `<p class="stl-example-card__part">${example.part}</p>` +
+          `<p class="stl-example-card__meta">${example.size_mm[0]} × ${example.size_mm[1]} mm · ${example.selection}</p>` +
+          `</div>` +
+          `<button type="button" class="primary">Use this shape</button>`;
+        card.querySelector("button").addEventListener("click", () => loadStlExample(example));
+        stlGalleryEl.appendChild(card);
+      }
+    })
+    .catch(() => {
+      stlGalleryEl.innerHTML =
+        '<p class="hint">Could not load the robot example gallery.</p>';
+    });
+}

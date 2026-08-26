@@ -1088,7 +1088,17 @@ window.addEventListener("otc:dxf-outline", (e) => {
 // into the form first so the loaded design is fully editable afterwards and
 // the fields show exactly what produced the result.
 window.addEventListener("otc:load-example", (e) => {
-  const { outline, params = {}, label = "example" } = e.detail || {};
+  const {
+    outline, params = {}, label = "example",
+    // A real robot surface is a SHAPE, not a finished design: which edge the
+    // connector exits is a decision about the reader's own build, so those
+    // examples require the same explicit Set cable edge as a DXF import (and
+    // so can't auto-generate, since Generate is blocked until it's set). The
+    // simple built-in shapes above still ship a designed cable edge and
+    // generate immediately, which is what makes them a one-click demo.
+    requireCableEdge = false,
+    autoGenerate = true,
+  } = e.detail || {};
   if (!Array.isArray(outline) || outline.length < 3) return;
   if (!confirmOverwrite(vertices.length, "board outline")) return;
   pushUndo();
@@ -1097,8 +1107,7 @@ window.addEventListener("otc:load-example", (e) => {
   vertices = outline.map((p) => [p[0], p[1]]);
   fillVertices = [];
   foldLines = [];
-  // Examples ship a designed cable edge as edge 0->1, same as presets.
-  cableEdgeConfirmed = true;
+  cableEdgeConfirmed = !requireCableEdge;
   selected = null;
   angleReferenceEdge = null;
   for (const [key, value] of Object.entries(params)) {
@@ -1119,13 +1128,19 @@ window.addEventListener("otc:load-example", (e) => {
   syncGridMode();
   syncAutoExpandControls();
   renderPixelPreview();
-  hideCableEdgeBanner();
   fitViewTo(vertices);
   redraw();
   setOutlineInfo(`example: ${label}`);
   syncDimensionFields();
   updateCadButtons();
-  runGenerate();
+  if (requireCableEdge) {
+    showCableEdgeBanner();
+    genStatus.textContent =
+      `${label} loaded — choose where the connector tail exits, then press Generate PCB.`;
+  } else {
+    hideCableEdgeBanner();
+  }
+  if (autoGenerate) runGenerate();
 });
 
 // Dev annotation capture (stl-viewer.js "Save as example") reads the outline

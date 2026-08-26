@@ -36,6 +36,7 @@ const patchFlipBtn = document.getElementById("patch-flip");
 const connectionsEl = document.getElementById("stl-connections");
 
 let scene, camera, renderer, controls, mesh, highlightMesh;
+let gridHelper, axesHelper;
 let raycaster, downPt, surfaceModel;
 let selectionMode = "single";
 let selectedRegions = new Set();
@@ -113,8 +114,10 @@ function init() {
   const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
   fillLight.position.set(-1, -0.5, -1);
   scene.add(fillLight);
-  scene.add(new THREE.GridHelper(200, 40, 0x33414f, 0x1b2530));
-  scene.add(new THREE.AxesHelper(20));
+  gridHelper = new THREE.GridHelper(200, 40, 0x33414f, 0x1b2530);
+  axesHelper = new THREE.AxesHelper(20);
+  scene.add(gridHelper);
+  scene.add(axesHelper);
 
   // A click selects; pointer movement is left to OrbitControls.
   raycaster = new THREE.Raycaster();
@@ -273,6 +276,78 @@ function loadArrayBuffer(buffer, filename) {
     `${surfaceModel.regions.length} planar faces · ` +
     `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} mm${warning}`;
 }
+
+// Replays a saved annotation's highlight (not its selection state or unfold
+// logic — just which triangles were picked) onto the currently loaded mesh:
+// used by the gallery-thumbnail generator. Every selection mode records its
+// picked triangles per click in click_order, including a chained multi-
+// surface join (several disconnected clicks + corner overrides) — the union
+// of every click's triangles is exactly what should render as highlighted,
+// regardless of how those clicks were later joined into one 2D outline, so
+// this needs none of the unfold/chain machinery to reproduce the picture.
+window.__otc_debug = () => ({
+  hasHighlight: !!highlightMesh,
+  vertexCount: highlightMesh ? highlightMesh.geometry.attributes.position.count : 0,
+  selectedTrianglesSize: selectedTriangles.size,
+  boundingBox: highlightMesh ? (highlightMesh.geometry.computeBoundingBox(), highlightMesh.geometry.boundingBox.min.toArray().concat(highlightMesh.geometry.boundingBox.max.toArray())) : null,
+  cameraPos: camera.position.toArray(),
+  target: controls.target.toArray(),
+});
+
+// Dev tooling hook (gallery-thumbnail generator): load an STL from raw bytes
+// without going through the file-input UI at all.
+window.__otcLoadForThumb = loadArrayBuffer;
+
+window.otcReplayAnnotationHighlight = function (annotation, { thumbnailFraming = false } = {}) {
+  if (!surfaceModel) throw new Error("Load the STL first.");
+  const triangles = new Set();
+  for (const entry of annotation.click_order || []) {
+    for (const t of entry.triangles || []) triangles.add(t);
+  }
+  selectedTriangles = triangles;
+  selectedRegions = new Set();
+  refreshHighlight();
+  if (thumbnailFraming) {
+    // The interactive default (frameObject) leaves generous orbit/pan room —
+    // deliberately conservative for live use, but reads as "tiny object lost
+    // in a big dark grid" in a small gallery card. Same viewing direction
+    // (frameObject's own isometric-ish homePos angle), just pulled in tight,
+    // with the grid/axes hidden — this hook exists only for the thumbnail
+    // generator's disposable tab, so it doesn't need to restore either.
+    gridHelper.visible = false;
+    axesHelper.visible = false;
+    // Look at the selected patch from ITS OWN side, not from the viewer's
+    // fixed default angle: the whole point of the thumbnail is showing which
+    // faces were picked, and a patch on the far side of the part is simply
+    // occluded by the part itself from any fixed direction (confirmed live —
+    // the Yubi pad's selection sits entirely in -x while the default camera
+    // sits at +x, so the highlight rendered perfectly and was hidden behind
+    // the mesh the whole time). Average the selected triangles' normals to
+    // get the direction the patch faces, then back the camera off along it.
+    const avgNormal = new THREE.Vector3();
+    for (const t of triangles) avgNormal.add(surfaceModel.triNormals[t]);
+    // A wrap-around selection can average to ~zero (normals cancel); the
+    // default angle is as good as any there, so keep it.
+    const dir = avgNormal.lengthSq() > 1e-6
+      ? avgNormal.normalize()
+      : camera.position.clone().sub(controls.target).normalize();
+    // Tilt slightly off the pure face-on normal so the part still reads as
+    // a 3D object rather than a flat silhouette.
+    dir.add(new THREE.Vector3(0, 0.35, 0)).normalize();
+    // Scale DOWN the app's own already-safe framing distance (homePos, from
+    // frameObject) rather than recomputing one from modelRadius directly —
+    // a fixed multiple of radius is only safe for roughly ball-shaped parts.
+    // For an elongated part (e.g. a 99mm jaw with a ~20-48mm cross-section)
+    // the bounding-sphere radius is dominated by the long axis, so a "tight"
+    // distance derived straight from it can end up literally inside the
+    // mesh — confirmed live as an unrecognizable close-up sliver.
+    const tight = homePos.length() * 0.62;
+    camera.position.copy(controls.target).add(dir.multiplyScalar(tight));
+    camera.lookAt(controls.target);
+    camera.updateMatrixWorld();
+    controls.update();
+  }
+};
 
 function selectFaceAt(clientX, clientY) {
   if (!mesh || !surfaceModel) return;
