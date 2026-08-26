@@ -1293,11 +1293,17 @@ if (exampleSelect && devExampleRow && API_BASE === "") {
   fetch(`${API_BASE}/dev/example-stls`)
     .then((r) => r.json())
     .then(({ paths }) => {
+      // Server paths are relative to stl_examples/ (so its handful of older
+      // root-level files — the Yubi pad, a soft fingertip, SO-100 parts —
+      // show up too, not just the end_effectors/ library). Strip that one
+      // transparent prefix before grouping/naming so it never leaks into a
+      // display name or a generated annotation name.
       const byRobot = new Map();
       for (const path of paths || []) {
-        const slash = path.indexOf("/");
-        const robot = slash >= 0 ? path.slice(0, slash) : "(root)";
-        const part = slash >= 0 ? path.slice(slash + 1) : path;
+        const logical = path.replace(/^end_effectors\//, "");
+        const slash = logical.indexOf("/");
+        const robot = slash >= 0 ? logical.slice(0, slash) : "(other examples)";
+        const part = slash >= 0 ? logical.slice(slash + 1) : logical;
         if (!byRobot.has(robot)) byRobot.set(robot, []);
         byRobot.get(robot).push({ path, part });
       }
@@ -1318,15 +1324,16 @@ if (exampleSelect && devExampleRow && API_BASE === "") {
   exampleSelect.addEventListener("change", async () => {
     const path = exampleSelect.value;
     if (!path) return;
-    infoEl.textContent = `Loading ${path}…`;
+    const logical = path.replace(/^end_effectors\//, "");
+    infoEl.textContent = `Loading ${logical}…`;
     try {
       const resp = await fetch(`${API_BASE}/dev/example-stl?path=${encodeURIComponent(path)}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buffer = await resp.arrayBuffer();
-      loadArrayBuffer(buffer, path);
-      currentExamplePath = path; // after loadArrayBuffer, which clears it
+      loadArrayBuffer(buffer, logical);
+      currentExamplePath = logical; // after loadArrayBuffer, which clears it
     } catch (err) {
-      showError(`Could not load ${path}: ${err.message}`);
+      showError(`Could not load ${logical}: ${err.message}`);
     }
   });
 }
