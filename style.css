@@ -896,3 +896,38 @@ dl.bump-stats dd { margin: 0; color: var(--text); }
   .topbar { flex-wrap: wrap; }
   .topnav { order: 3; width: 100%; justify-content: center; }
 }
+
+/* ---- Describe mode: the plain-English chat panel (chat-panel.js) --------
+   Sized to sit in the controls sidebar next to Draw/DXF/STL, so the
+   conversation and the board stay visible at the same time. */
+.chat-log {
+  max-height: 340px;
+  overflow-y: auto;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.chat-log:empty { display: none; }
+.chat-msg__who {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+  margin-bottom: 2px;
+}
+.chat-msg__body { white-space: pre-wrap; font-size: 13px; line-height: 1.45; }
+.chat-msg--user .chat-msg__body { opacity: 0.85; font-style: italic; }
+.chat-msg--error .chat-msg__body { color: #c0392b; }
+.chat-tools { margin-top: 5px; font-size: 12px; }
+.chat-tools summary { cursor: pointer; opacity: 0.65; }
+.chat-tools pre {
+  overflow-x: auto;
+  font-size: 11px;
+  margin: 5px 0 0;
+  padding: 6px;
+  line-height: 1.35;
+}
+.chat-form { display: flex; gap: 6px; margin-bottom: 6px; }
+.chat-form input { flex: 1; min-width: 0; }
+.chat-status { flex: 1; }

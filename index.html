@@ -101,6 +101,11 @@
           <p>Have a 3D model of the actual part — a gripper jaw, a fingertip, a prosthetic socket? Upload it and unfold its surface at true scale, like unwrapping paper from the part, so your sensor fits exactly.</p>
           <button type="button" class="primary mode-card__cta" data-mode="stl">Upload STL</button>
         </article>
+        <article class="panel mode-card">
+          <h2>Describe it in words</h2>
+          <p>Not sure where to start? Say what you want in plain English — the size, the shape, how fine the sensing needs to be — and an assistant designs it with the real generator, then hands it to you here to edit.</p>
+          <button type="button" class="primary mode-card__cta" data-mode="chat">Describe a sensor</button>
+        </article>
       </div>
 
       <h3 class="landing-modes__label">Two more ways to use OpenTactileCAD</h3>
@@ -178,7 +183,28 @@
           <button type="button" class="mode-button" data-mode="draw" id="mode-btn-draw">Draw</button>
           <button type="button" class="mode-button" data-mode="dxf" id="mode-btn-dxf">DXF</button>
           <button type="button" class="mode-button" data-mode="stl" id="mode-btn-stl">STL</button>
+          <button type="button" class="mode-button" data-mode="chat" id="mode-btn-chat">Describe</button>
         </div>
+
+        <section class="group chat-sidebar-group" id="chat-sidebar-group" hidden>
+          <h2>1 · Describe your sensor</h2>
+          <p class="hint">
+            Say what you need in plain English — "a 40 × 40 mm square sensor with
+            2 mm taxel pitch, cable at the bottom". The assistant designs it with
+            the real generator and loads the result here, fully editable. Ask for
+            changes the same way: "make the pitch 1.5 mm", "move the connector to
+            the top".
+          </p>
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form" class="chat-form" autocomplete="off">
+            <input id="chat-input" type="text" placeholder="Describe a sensor…" />
+            <button id="chat-send" type="submit" class="primary">Send</button>
+          </form>
+          <div class="row">
+            <span id="chat-status" class="hint chat-status"></span>
+            <button id="chat-reset" type="button" class="secondary">New conversation</button>
+          </div>
+        </section>
 
         <section class="group stl-sidebar-group" id="stl-sidebar-group">
           <h2>1 · 3D Model (STL)</h2>
@@ -772,6 +798,9 @@
   </section>
 
   <script type="module" src="views.js"></script>
+  <!-- Before app.js on purpose: it captures the #otc= payload synchronously,
+       ahead of the view router in views.js rewriting location.hash. -->
+  <script type="module" src="hash-import.js"></script>
   <script type="module" src="app.js"></script>
   <script type="module" src="stl-viewer.js"></script>
   <script type="module" src="bump-sheet.js"></script>
@@ -779,5 +808,6 @@
   <script type="module" src="landing.js"></script>
   <script type="module" src="examples.js"></script>
   <script type="module" src="tour.js"></script>
+  <script type="module" src="chat-panel.js"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ import { showView } from "./views.js";
 
 const stlGroup = document.getElementById("stl-sidebar-group");
 const dxfGroup = document.getElementById("dxf-import-group");
+const chatGroup = document.getElementById("chat-sidebar-group");
 const modeSwitcherButtons = document.querySelectorAll(".mode-switcher .mode-button");
 
 let selectedMode = null;
@@ -12,6 +13,7 @@ export function applyModeVisibility(mode) {
   selectedMode = mode;
   if (stlGroup) stlGroup.hidden = mode !== "stl";
   if (dxfGroup) dxfGroup.hidden = mode !== "dxf";
+  if (chatGroup) chatGroup.hidden = mode !== "chat";
   modeSwitcherButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.mode === mode));
   // Nudge stl-viewer.js's resize logic in case the STL panel just became visible.
   window.dispatchEvent(new CustomEvent("otc:view-shown"));
