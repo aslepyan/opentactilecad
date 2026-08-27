@@ -92,12 +92,33 @@ if (form) {
     }));
   }
 
+  // A design turn runs 10-60s behind one request. Poll the server for what it
+  // is actually doing so the wait shows the pipeline's real steps and numbers
+  // instead of a motionless "thinking…", which reads as a hang.
+  function trackProgress(node) {
+    let stopped = false;
+    const body = node.querySelector(".chat-msg__body");
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const r = await fetch(
+          `${CHAT_API}/progress?session_id=${encodeURIComponent(SESSION)}`);
+        const d = await r.json();
+        if (!stopped && d.steps?.length) body.textContent = d.steps.join("\n");
+      } catch { /* a dropped poll is not worth surfacing; the POST decides */ }
+      if (!stopped) setTimeout(tick, 1000);
+    };
+    tick();
+    return () => { stopped = true; };
+  }
+
   async function send(text) {
     bubble("you", text, "chat-msg--user");
     input.value = "";
     sendBtn.disabled = true;
     status.textContent = "designing… a board takes 10-40s";
-    const pending = bubble("assistant", "thinking…");
+    const pending = bubble("assistant", "Thinking…");
+    const stopProgress = trackProgress(pending);
 
     let data;
     try {
@@ -108,6 +129,7 @@ if (form) {
       });
       data = await r.json();
     } catch (err) {
+      stopProgress();
       pending.remove();
       bubble("error", `Could not reach the design assistant. ${err}`,
              "chat-msg--error");
@@ -116,6 +138,7 @@ if (form) {
       return;
     }
 
+    stopProgress();
     pending.remove();
     if (data.error) {
       bubble("error", data.error, "chat-msg--error");
