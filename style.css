@@ -931,3 +931,26 @@ dl.bump-stats dd { margin: 0; color: var(--text); }
 .chat-form { display: flex; gap: 6px; margin-bottom: 6px; }
 .chat-form input { flex: 1; min-width: 0; }
 .chat-status { flex: 1; }
+
+
+/* Two-piece case panel. Reuses the bump-panel styling; only the top-piece
+   chooser and the preview selector are new. */
+.case-top-choice {
+  border: 1px solid var(--line, #ddd);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem 0.65rem;
+  margin: 0 0 0.75rem;
+}
+.case-top-choice legend {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+  padding: 0 0.35rem;
+}
+.case-show-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.case-show-field select { margin-left: 0.15rem; }

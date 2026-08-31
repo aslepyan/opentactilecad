@@ -646,6 +646,106 @@
           </div>
         </div>
 
+
+        <!-- Two-piece printed case. The shear bumps are a version of the TOP
+             piece, not a separate part: flat lid or bumped lid. -->
+        <div class="panel bump-panel" id="case-panel">
+          <div class="bump-head">
+            <label class="check-field" title="A printed TPU case in two halves: a bottom with a pocket the sensor drops into, and a lid held on by a ribbed perimeter joint. No glue and no screws.">
+              <input id="case-enable" type="checkbox" />
+              Add a printed case (two 3D-printed parts)
+            </label>
+          </div>
+          <div class="bump-body" id="case-body" hidden>
+            <p class="hint">
+              The bottom piece has a shallow pocket for the flex and the Velostat.
+              The lid drops on and is held by a rib that runs round the perimeter,
+              broken at intervals — every gap in the rib is a bridge that keeps the
+              lid a single piece. Both halves stop at the cable edge, so the tail
+              leaves through the open side.
+            </p>
+
+            <fieldset class="case-top-choice">
+              <legend>Top piece</legend>
+              <label class="radio-field" title="A plain flat lid. Reads normal force only.">
+                <input type="radio" name="case-top" value="flat" checked />
+                <span>Flat</span>
+              </label>
+              <label class="radio-field" title="One bump over each 2x2 group of sensors. Pressing sideways tilts the bump, so those four sensors read differently and you can tell which way the surface was pushed.">
+                <input type="radio" name="case-top" value="bumps" />
+                <span>Shear-sensing bumps</span>
+              </label>
+            </fieldset>
+
+            <div class="bump-fields" id="case-bump-fields" hidden>
+              <label title="How tall each bump stands above the lid.">
+                Bump height
+                <input id="case-bump-height" type="number" min="0.4" max="10" step="0.2" value="2.0" />
+              </label>
+              <label title="Bump base diameter as a percentage of the 2x2 block it covers.">
+                Bump width (% of block)
+                <input id="case-bump-base" type="number" min="30" max="100" step="5" value="80" />
+              </label>
+              <label title="Bump top diameter as a percentage of its base. Lower is more pointed, which tips more readily.">
+                Bump taper (top % of base)
+                <input id="case-bump-top" type="number" min="20" max="100" step="5" value="70" />
+              </label>
+            </div>
+
+            <div class="bump-fields">
+              <label title="Depth of the pocket in the bottom piece. Just deep enough for the flex plus the Velostat — not the whole board.">
+                Pocket depth
+                <input id="case-recess" type="number" min="0.1" max="4" step="0.05" value="0.30" />
+              </label>
+              <label title="Thickness of the floor under the sensor.">
+                Floor thickness
+                <input id="case-plate" type="number" min="0.3" max="4" step="0.1" value="0.60" />
+              </label>
+              <label title="Thickness of the lid. The rib passes through a slot in this, so thicker is less likely to tear.">
+                Lid thickness
+                <input id="case-lid" type="number" min="0.4" max="4" step="0.1" value="0.80" />
+              </label>
+              <label title="Width of the rim around the sensor. The rib runs down the middle of it. With shear bumps the rim also has to fit the slit that decouples them, so do not go below about 4mm.">
+                Skirt width
+                <input id="case-skirt" type="number" min="1.5" max="12" step="0.5" value="4.0" />
+              </label>
+            </div>
+
+            <details class="advanced bump-advanced">
+              <summary>Rib pattern</summary>
+              <div class="bump-fields">
+                <label title="One rib segment plus one gap. Shorter means more segments — and more segment ends, which is where the lid tears from.">
+                  Period
+                  <input id="case-period" type="number" min="6" max="60" step="1" value="20" />
+                </label>
+                <label title="How much of each period is gap rather than rib. Every gap is a bridge holding the lid together; more gap means a stiffer lid and less grip.">
+                  Gap
+                  <input id="case-gap" type="number" min="2" max="40" step="0.5" value="10" />
+                </label>
+                <label title="Extra clearance cut around the board edge so it drops into the pocket.">
+                  Fit tolerance
+                  <input id="case-tolerance" type="number" min="0" max="1.5" step="0.05" value="0.20" />
+                </label>
+              </div>
+            </details>
+
+            <div class="bump-actions">
+              <button id="case-generate" type="button" class="primary" disabled>Generate case</button>
+              <label class="mini case-show-field">Preview
+                <select id="case-show" disabled>
+                  <option value="bottom">Bottom piece</option>
+                  <option value="top">Top piece</option>
+                </select>
+              </label>
+              <button id="case-dl-bottom" type="button" class="secondary" disabled>Download bottom</button>
+              <button id="case-dl-top" type="button" class="secondary" disabled>Download top</button>
+            </div>
+            <div id="case-status" class="mini"></div>
+            <div id="case-container" class="stl-container bump-container" hidden></div>
+            <div id="case-stats" class="mini" hidden></div>
+          </div>
+        </div>
+
         <div class="panel download-bar">
           <span id="pdf-status" class="mini download-bar__status"></span>
           <button id="download-pdf" type="button" class="secondary" disabled
@@ -835,6 +935,7 @@
   <script type="module" src="app.js"></script>
   <script type="module" src="stl-viewer.js"></script>
   <script type="module" src="bump-sheet.js"></script>
+  <script type="module" src="case.js"></script>
   <script type="module" src="dxf-import.js"></script>
   <script type="module" src="landing.js"></script>
   <script type="module" src="examples.js"></script>

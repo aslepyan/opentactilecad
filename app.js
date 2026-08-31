@@ -1600,6 +1600,7 @@ async function runGenerate(overrides = {}) {
   // Any previously built bump sheet belongs to the OLD board. Drop it before
   // the new one lands, so a stale STL can never be downloaded as if it fitted.
   window.otcBumpInvalidate?.();
+  window.otcCaseInvalidate?.();
   try {
     const resp = await fetch(`${API_BASE}/generate`, {
       method: "POST",
@@ -1623,6 +1624,7 @@ async function runGenerate(overrides = {}) {
     downloadBtn.disabled = false;
     setPrintPdf(data.stats);
     window.otcBumpBoardReady?.(!!data.edit_data);
+    window.otcCaseBoardReady?.(!!data.edit_data);
     renderStats(data.stats, data.drc);
     updateConnectorUpsizeControl(data.stats.connector_pos);
     tailExtensionPromptDismissed = false;
