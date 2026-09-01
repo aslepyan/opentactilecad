@@ -18,6 +18,9 @@ const statusEl = document.getElementById("case-status");
 const containerEl = document.getElementById("case-container");
 const statsEl = document.getElementById("case-stats");
 const bumpFieldsEl = document.getElementById("case-bump-fields");
+const hatchFieldsEl = document.getElementById("case-hatch-fields");
+const hatchBumpFieldsEl = document.getElementById("case-hatch-bump-fields");
+const hatchBumpsEl = document.getElementById("case-hatch-bumps");
 const showSel = document.getElementById("case-show");
 
 const F = (id) => document.getElementById(id);
@@ -31,9 +34,9 @@ let bottomBytes = null;
 let topBytes = null;
 let busy = false;
 
-function lidHasBumps() {
+function lidStyle() {
   const sel = document.querySelector('input[name="case-top"]:checked');
-  return !!sel && sel.value === "bumps";
+  return sel ? sel.value : "flat";
 }
 
 function updateButtons() {
@@ -41,7 +44,11 @@ function updateButtons() {
   dlBottomBtn.disabled = !bottomBytes;
   dlTopBtn.disabled = !topBytes;
   showSel.disabled = !bottomBytes;
-  if (bumpFieldsEl) bumpFieldsEl.hidden = !lidHasBumps();
+  if (bumpFieldsEl) bumpFieldsEl.hidden = lidStyle() !== "bumps";
+  if (hatchFieldsEl) hatchFieldsEl.hidden = lidStyle() !== "hatch";
+  if (hatchBumpFieldsEl) {
+    hatchBumpFieldsEl.hidden = lidStyle() !== "hatch" || !hatchBumpsEl.checked;
+  }
 }
 
 /** Called by app.js when a board finishes generating. */
@@ -75,6 +82,7 @@ enableEl.addEventListener("change", () => {
 for (const el of document.querySelectorAll('input[name="case-top"]')) {
   el.addEventListener("change", updateButtons);
 }
+hatchBumpsEl.addEventListener("change", updateButtons);
 
 function preview() {
   const bytes = showSel.value === "top" ? topBytes : bottomBytes;
@@ -109,14 +117,22 @@ generateBtn.addEventListener("click", async () => {
   statusEl.textContent = "Building the case…";
   try {
     const params = {
-      recess_depth_mm: num(F("case-recess"), 0.3),
+      recess_depth_mm: num(F("case-recess"), 0.2),
       plate_thickness_mm: num(F("case-plate"), 0.6),
       lid_thickness_mm: num(F("case-lid"), 0.8),
       skirt_width_mm: num(F("case-skirt"), 4.0),
       rib_period_mm: num(F("case-period"), 20),
       rib_gap_mm: num(F("case-gap"), 10),
       recess_tolerance_mm: num(F("case-tolerance"), 0.2),
-      bumps: lidHasBumps(),
+      bumps: lidStyle() === "bumps",
+      hatch: lidStyle() === "hatch",
+      hatch_through: F("case-hatch-through").checked,
+      hatch_depth_mm: num(F("case-hatch-depth"), 0.4),
+      hatch_groove_mm: num(F("case-hatch-width"), 0.9),
+      hatch_tab_mm: num(F("case-hatch-tab"), 1.2),
+      hatch_bumps: hatchBumpsEl.checked,
+      hatch_bump_dia_mm: num(F("case-hatch-bump-dia"), 1.8),
+      hatch_bump_height_mm: num(F("case-hatch-bump-height"), 0.6),
     };
     const body = { edit_data: editData, params };
     if (params.bumps) {
@@ -159,8 +175,17 @@ function renderStats(s, warnings) {
     ["Bridges", `${s.bridges} gaps, ${s.bridge_mm} mm holding the lid`],
     ["Pattern", `${s.rib_period_mm} mm period — ${(s.rib_period_mm - s.rib_gap_mm).toFixed(0)} rib / ${s.rib_gap_mm} gap`],
     ["Undercut", `${s.undercut_mm} mm per side`],
+    ["Cable clear of case", `${s.tail_flex_mm} mm of flex before the connector`],
   ];
   if (s.bumps) rows.push(["Bumps on lid", `${s.bumps}`]);
+  if (s.hatch) {
+    rows.push(["Hatched lid", s.hatch_through
+      ? "cut through, tabs holding it"
+      : `grooved, ${s.hatch_web_mm} mm web`]);
+    if (s.hatch_bumps) {
+      rows.push(["Bumps per sensor", `${s.hatch_bumps} on the ${s.hatch_bump_face} face`]);
+    }
+  }
   if (s.lid_pieces > 1) {
     rows.push(["Lid", `${s.lid_pieces} loose pieces — increase the gap`]);
   }
