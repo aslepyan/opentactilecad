@@ -786,6 +786,12 @@
         </div>
 
         <div class="panel download-bar">
+          <label class="download-bar__name" for="design-name">
+            <span class="mini">Name</span>
+            <input id="design-name" type="text" spellcheck="false"
+                   autocomplete="off"
+                   title="Base name for every file you download from this design. Defaults to the file you started from, or the date and time if you drew it from scratch.">
+          </label>
           <span id="pdf-status" class="mini download-bar__status"></span>
           <button id="download-pdf" type="button" class="secondary" disabled
                   title="A 1:1 printable outline. Print it at 100%, cut it out and hold it against the real part to check the fit before ordering boards.">Download printable PDF</button>
@@ -967,6 +973,7 @@
     </div>
   </section>
 
+  <script type="module" src="design-name.js"></script>
   <script type="module" src="views.js"></script>
   <!-- Before app.js on purpose: it captures the #otc= payload synchronously,
        ahead of the view router in views.js rewriting location.hash. -->

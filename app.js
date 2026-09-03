@@ -3,6 +3,7 @@
 // or a DXF import (dxf-import.js). A second, optional polygon (the "sensorize
 // zone") constrains where sensors get packed inside the outline.
 import { API_BASE } from "./config.js";
+import { downloadName } from "./design-name.js";
 import { createRouteEditor } from "./route-editor.js";
 
 const canvas = document.getElementById("outline-canvas");
@@ -1728,7 +1729,7 @@ downloadPdfBtn?.addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = "printable_1to1.pdf";
+  a.download = downloadName("1to1", "pdf");
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1887,7 +1888,7 @@ downloadBtn.addEventListener("click", async () => {
     }
     return;
   }
-  downloadZip(lastZipB64, "tactile_pcb.zip");
+  downloadZip(lastZipB64, downloadName("", "zip"));
 });
 
 // ---- health ping ----

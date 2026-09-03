@@ -12,6 +12,7 @@
 // Yubi gripper's curved pad surface (screw holes ignored). The "facts" lines
 // quote a verified local generate of the stored config (all DRC-clean).
 import { showView } from "./views.js";
+import { setSource } from "./design-name.js";
 import { applyModeVisibility } from "./landing.js";
 
 // Parameter values every example starts from (the app's own defaults), so a
@@ -115,6 +116,8 @@ function outlineThumbnail(outline) {
 }
 
 function loadExample(example) {
+  // An example's title is a better download name than a timestamp.
+  setSource(example.title);
   applyModeVisibility("draw");
   showView("tool");
   window.dispatchEvent(new CustomEvent("otc:load-example", {

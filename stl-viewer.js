@@ -13,6 +13,7 @@ import {
   unfoldSelectedTriangles,
 } from "./face-select.js";
 import { API_BASE } from "./config.js";
+import { setSource } from "./design-name.js";
 
 const container = document.getElementById("stl-container");
 const infoEl = document.getElementById("stl-info");
@@ -265,6 +266,8 @@ function loadArrayBuffer(buffer, filename) {
   mesh = new THREE.Mesh(geometry, material);
   scene.add(mesh);
   loadedName = filename;
+  // Name downloads after the mesh this design was cut from.
+  setSource(filename);
 
   setSelectionControlsEnabled(true);
   const triCount = geometry.attributes.position.count / 3;

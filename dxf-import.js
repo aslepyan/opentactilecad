@@ -2,6 +2,7 @@
 // chosen closed loop off to app.js via the same otc:*-outline event
 // convention stl-viewer.js already uses for STL face unfolding.
 import { API_BASE } from "./config.js";
+import { setSource } from "./design-name.js";
 
 const uploadBtn = document.getElementById("upload-dxf");
 const fileInput = document.getElementById("dxf-input");
@@ -15,6 +16,7 @@ fileInput?.addEventListener("change", async (event) => {
   if (!file) return;
 
   infoEl.textContent = `Importing ${file.name}…`;
+  setSource(file.name);
   infoEl.classList.remove("error");
 
   const formData = new FormData();

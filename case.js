@@ -7,6 +7,7 @@
 // The shear bumps are a SETTING here, not a separate part: "flat lid" and
 // "bumped lid" are two versions of the same top piece.
 import { API_BASE } from "./config.js";
+import { downloadName } from "./design-name.js";
 import { resetBumpView, showBumpStl } from "./bump-viewer.js";
 
 const enableEl = document.getElementById("case-enable");
@@ -103,8 +104,10 @@ function download(bytes, name) {
   URL.revokeObjectURL(url);
 }
 
-dlBottomBtn.addEventListener("click", () => bottomBytes && download(bottomBytes, "case_bottom.stl"));
-dlTopBtn.addEventListener("click", () => topBytes && download(topBytes, "case_top.stl"));
+dlBottomBtn.addEventListener("click", () =>
+  bottomBytes && download(bottomBytes, downloadName("case_bottom", "stl")));
+dlTopBtn.addEventListener("click", () =>
+  topBytes && download(topBytes, downloadName("case_top", "stl")));
 
 generateBtn.addEventListener("click", async () => {
   const editData = window.otcGetEditData?.();

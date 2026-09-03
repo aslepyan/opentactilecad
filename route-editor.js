@@ -2,6 +2,8 @@
 // Keeps generation untouched: edits are held in browser state, then submitted to
 // /export-edited so the final ZIP is rebuilt from the modified polylines.
 
+import { downloadName } from "./design-name.js";
+
 const SNAP_MM = 0.1;
 
 function cloneRoutes(routes) {
@@ -614,7 +616,7 @@ export function createRouteEditor({
     } else {
       setStatus(renderPreview ? "Tail extension preview ready. DRC clean." : "Edited export ready. DRC clean.");
     }
-    if (download) downloadZip(data.zip_b64, "tactile_pcb_edited.zip");
+    if (download) downloadZip(data.zip_b64, downloadName("edited", "zip"));
     updateButtons();
     return true;
   }

@@ -4,6 +4,7 @@
 // — you can rebuild the sheet several times against one board while tuning
 // bump height, without re-running the board.
 import { API_BASE } from "./config.js";
+import { downloadName } from "./design-name.js";
 import { resetBumpView, showBumpStl } from "./bump-viewer.js";
 
 const enableEl = document.getElementById("bump-enable");
@@ -158,7 +159,7 @@ downloadBtn.addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "bump_sheet.stl";
+  a.download = downloadName("bump_sheet", "stl");
   document.body.appendChild(a);
   a.click();
   a.remove();
