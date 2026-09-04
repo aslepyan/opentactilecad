@@ -139,6 +139,30 @@ async function openDesign(file) {
   const opened = await post("/open-design", { file: data });
   const warnings = (opened.warnings || []).join(" ");
 
+  if (opened.mode === "geometry") {
+    // A board from before the design block existed. Its geometry is exactly
+    // what was fabricated, so it goes straight to the canvas with no round
+    // trip through /export-edited — there is no layout to run through it, and
+    // re-routing to manufacture a new one would give copper that does not
+    // match the board the user already has.
+    setSource(label);
+    window.dispatchEvent(new CustomEvent("otc:restore-design", {
+      detail: {
+        outline: opened.outline,
+        params: opened.edit_data?.params || {},
+        fillRegion: null,
+        editData: opened.edit_data,
+        svg: opened.svg,
+        label,
+        geometryOnly: true,
+        notes: opened.warnings || [],
+      },
+    }));
+    say(`Reopened ${source} as a finished board — case and bump sheet are available. ` +
+        `It predates stored settings, so new manufacturing files cannot be built from it.`);
+    return;
+  }
+
   if (opened.mode === "restore") {
     say(`Restoring the board from ${source}…`);
     // The same call the route editor's own "Check DRC" makes. Re-running it

@@ -1201,7 +1201,13 @@ window.addEventListener("otc:load-example", (e) => {
 // further editing, but the preview and ZIP are the restored ones.
 window.addEventListener("otc:restore-design", (e) => {
   const { outline, params = {}, fillRegion = null, editData, svg, stats, drc,
-          zipB64, label = "design" } = e.detail || {};
+          zipB64, label = "design",
+          // A board recovered from a pre-design-block manifest: its geometry is
+          // exactly as fabricated, but the wiring was never in the file. The
+          // case and the bump sheet are geometry and still work; route editing
+          // and a manufacturing re-export do not, and must not be offered as
+          // if they did.
+          geometryOnly = false, notes = [] } = e.detail || {};
   if (!editData || !svg) return;
   if (!confirmOverwrite(vertices.length, "board outline")) return;
   pushUndo();
@@ -1236,17 +1242,66 @@ window.addEventListener("otc:restore-design", (e) => {
   window.otcBumpInvalidate?.();
   window.otcCaseInvalidate?.();
   routeEditor.load(editData, svg);
+  // Both paths enable the case and the bump sheet: they are built from the
+  // board's geometry, which a recovered design has in full.
+  window.otcBumpBoardReady?.(true);
+  window.otcCaseBoardReady?.(true);
+  tailExtensionPromptDismissed = false;
+  hideTailExtensionPrompt();
+
+  if (geometryOnly) {
+    // No ZIP and no DRC to show: nothing here was re-exported, because the
+    // copper cannot be reproduced. Say that plainly instead of leaving a
+    // Download button that would hand over an empty or wrong board.
+    lastZipB64 = null;
+    downloadBtn.disabled = true;
+    setPrintPdf(null);
+    renderRecoveredStats(editData, notes);
+    updateConnectorUpsizeControl(null);
+    genStatus.innerHTML =
+      `Reopened <strong>${label}</strong> as a finished board. Build a case or a bump ` +
+      `sheet from it below — those are shaped from the board, so they fit the one you ` +
+      `already had made. Downloading new manufacturing files is not possible: the wiring ` +
+      `was never stored in this file.`;
+    return;
+  }
+
   lastZipB64 = zipB64 || null;
   downloadBtn.disabled = !lastZipB64;
   setPrintPdf(stats);
-  window.otcBumpBoardReady?.(true);
-  window.otcCaseBoardReady?.(true);
   renderStats(stats, drc);
   updateConnectorUpsizeControl(stats?.connector_pos);
-  tailExtensionPromptDismissed = false;
-  hideTailExtensionPrompt();
   genStatus.textContent = `Reopened ${label}. Edit and re-download, or press Generate PCB to rebuild it from its settings.`;
 });
+
+// The stats panel for a recovered board. renderStats cannot be reused: it
+// reads connector, board mode and DRC off a generate response, and none of
+// those exist here — inventing them would be the one thing this whole path
+// is trying to avoid.
+function renderRecoveredStats(editData, notes) {
+  const pts = editData.final_outline || editData.outline || [];
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  const w = xs.length ? Math.max(...xs) - Math.min(...xs) : 0;
+  const h = ys.length ? Math.max(...ys) - Math.min(...ys) : 0;
+  const p = editData.params || {};
+  const rows = [
+    ["Sensing spots (taxels)", `${(editData.layout?.placements_xy || []).length}`],
+    ["Board size", `${w.toFixed(1)} × ${h.toFixed(1)} mm, exactly as manufactured`],
+    ["Taxel", `${p.pixel_w_mm} × ${p.pixel_h_mm} mm on a ${p.pitch_x_mm} × ${p.pitch_y_mm} mm pitch`],
+    ["Recovered from", `${editData.recovered_from || "an older export"}`],
+  ];
+  // Same <table> markup renderStats uses, so this inherits the panel's styling
+  // instead of needing classes of its own.
+  statsEl.innerHTML =
+    "<table>" +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
+    "</table>" +
+    (notes.length
+      ? "<details class=\"stats-details\" open><summary>About this recovered board</summary>" +
+        `<ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul></details>`
+      : "");
+}
 
 // Dev annotation capture (stl-viewer.js "Save as example") reads the outline
 // exactly as it currently sits on the canvas — including any cable-edge

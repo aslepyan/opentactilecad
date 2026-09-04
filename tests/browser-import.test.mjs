@@ -249,6 +249,58 @@ try {
      `the rebuild has the original anchor-hole count (${recipe.originalHoles})`,
      recipe.statsText.slice(0, 200));
 
+  // ---- a pre-design-block manifest opens as a finished board ----
+  // The real case this exists for: a board that was already fabricated, whose
+  // owner needs a case for it. Case and bump sheet must come alive; the
+  // download must NOT, because no honest manufacturing files can be produced.
+  const legacy = await evaluate(`(async () => {
+    const made = await window.__otc.gen({
+      outline: [[-20.5,0],[20.5,0],[20.5,41],[-20.5,41]], router: "hug",
+      board_mode: "expand", pixel_w_mm: 3, pixel_h_mm: 3,
+      pitch_x_mm: 3.2, pitch_y_mm: 3.2,
+    });
+    const bin = window.__otc.zipBytes(made.zip_b64);
+    const entry = await window.__otc.mod.readZipEntry(bin.buffer, ["manifest.json"]);
+    // Strip it back to what an August export actually held.
+    const man = JSON.parse(entry.text);
+    delete man.design; man.v = 3;
+
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(man)], "fabricated_board.json",
+                          { type: "application/json" }));
+    const input = document.getElementById("design-input");
+    input.files = dt.files;
+    input.dispatchEvent(new Event("change"));
+    const info = document.getElementById("design-import-info");
+    for (let i = 0; i < 240; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      if (/finished board|Could not open/i.test(info.textContent)) break;
+    }
+    return {
+      info: info.textContent.trim(),
+      status: document.getElementById("gen-status").textContent.trim(),
+      taxelsShown: /Sensing spots/.test(document.getElementById("stats").textContent),
+      stats: document.getElementById("stats").textContent.replace(/\\s+/g," ").slice(0, 200),
+      hasSvg: !!document.querySelector("#pcb-preview svg"),
+      svgTaxels: document.querySelectorAll("#pcb-preview svg rect.pixel").length,
+      downloadDisabled: document.getElementById("download").disabled,
+      caseDisabled: document.getElementById("case-generate").disabled,
+      bumpDisabled: document.getElementById("bump-generate").disabled,
+      storedTaxels: made.stats.active_pixels,
+    };
+  })()`);
+  console.log("    legacy ->", JSON.stringify(legacy).slice(0, 460));
+  ok(/finished board/i.test(legacy.info), "a legacy manifest opens as a finished board", legacy.info);
+  ok(legacy.hasSvg, "the recovered board renders a preview");
+  ok(legacy.svgTaxels === legacy.storedTaxels,
+     `the preview draws every stored taxel (${legacy.svgTaxels}/${legacy.storedTaxels})`);
+  ok(legacy.taxelsShown, "the stats panel describes the recovered board", legacy.stats);
+  ok(legacy.downloadDisabled === true,
+     "Download ZIP is disabled — no honest manufacturing files exist");
+  ok(legacy.caseDisabled === false, "the case builder is enabled", String(legacy.caseDisabled));
+  ok(legacy.bumpDisabled === false, "the bump sheet is enabled", String(legacy.bumpDisabled));
+  ok(/case|bump/i.test(legacy.status), "the page says what can still be built", legacy.status);
+
   // ---- a junk file is refused, not swallowed ----
   const junk = await evaluate(`(async () => {
     const dt = new DataTransfer();
