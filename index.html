@@ -102,6 +102,11 @@
           <button type="button" class="primary mode-card__cta" data-mode="stl">Upload STL</button>
         </article>
         <article class="panel mode-card">
+          <h2>Continue a saved design</h2>
+          <p>Already downloaded a design from here? Open that ZIP again to pick up where you left off &mdash; the board comes back exactly as it was, hand-moved routes included, ready to edit and re-download.</p>
+          <button type="button" class="primary mode-card__cta" data-mode="open">Open a design</button>
+        </article>
+        <article class="panel mode-card">
           <h2>Describe it in words</h2>
           <p>Not sure where to start? Say what you want in plain English — the size, the shape, how fine the sensing needs to be — and an assistant designs it with the real generator, then hands it to you here to edit.</p>
           <button type="button" class="primary mode-card__cta" data-mode="chat">Describe a sensor</button>
@@ -184,6 +189,7 @@
           <button type="button" class="mode-button" data-mode="dxf" id="mode-btn-dxf">DXF</button>
           <button type="button" class="mode-button" data-mode="stl" id="mode-btn-stl">STL</button>
           <button type="button" class="mode-button" data-mode="chat" id="mode-btn-chat">Describe</button>
+          <button type="button" class="mode-button" data-mode="open" id="mode-btn-open">Open</button>
         </div>
 
         <section class="group chat-sidebar-group" id="chat-sidebar-group" hidden>
@@ -265,6 +271,21 @@
             <input id="dxf-input" type="file" accept=".dxf" hidden />
           </div>
           <div id="dxf-info" class="mini"></div>
+        </section>
+
+        <section class="group" id="design-import-group" hidden>
+          <h2>1 &middot; Open a saved design</h2>
+          <p class="hint">
+            Pick the <code>.zip</code> you downloaded before &mdash; no need to unzip it.
+            The board comes back exactly as you left it, including any routes you
+            moved by hand, and stays fully editable. A loose
+            <code>design.json</code> or <code>manifest.json</code> works too.
+          </p>
+          <div class="row">
+            <button id="open-design" type="button" class="primary">Open design file</button>
+            <input id="design-input" type="file" accept=".zip,.json,application/json,application/zip" hidden />
+          </div>
+          <div id="design-import-info" class="mini"></div>
         </section>
 
         <section class="group" id="params-group">
@@ -904,8 +925,12 @@
             <li>A <code>.kicad_pcb</code> board file and pixel/connector footprints.</li>
             <li>Gerber files (the industry-standard format PCB fabs use).</li>
             <li>An Excellon drill file for vias.</li>
-            <li>A JSON manifest describing pixel placements, useful for driving the sensor from a microcontroller.</li>
+            <li><code>manifest.json</code> &mdash; taxel placements and the scan matrix, for driving the sensor from a microcontroller. It also carries a <code>design</code> block with every setting the board was made from.</li>
+            <li><code>design.json</code> &mdash; the design itself, so you can reopen it here later.</li>
           </ul>
+          <h3>Reopening a design</h3>
+          <p>Keep the ZIP and you can carry on where you left off: <strong>Open</strong> in the mode switcher (or <strong>Continue a saved design</strong> on the front page) takes the ZIP back &mdash; no need to unzip it &mdash; and puts the board and every setting back on screen, including routes you moved by hand.</p>
+          <p>If the app has been updated since you downloaded it, the exact board can no longer be guaranteed, so it is rebuilt from its saved settings instead and you are told so. That rebuild reproduces the same board; only hand edits to individual routes are lost.</p>
           <p>The connector is auto-selected as the smallest 0.5mm-pitch FPC connector (20 up to 100 positions) that fits your sensor's row and column count. If you need a specific larger size — say, to slot into an existing readout board — a "Need a bigger connector?" control appears next to the stats after Generate, offering larger sizes up to 100-pos.</p>
           <h3>The printable 1:1 PDF</h3>
           <p>Both the ZIP (<code>printable_1to1.pdf</code>) and the <strong>Download printable PDF</strong> button next to it give you a full-size paper template of your board. Print it, cut it out, and hold it against the real part <em>before</em> you order boards &mdash; it takes a minute and catches a wrong dimension that would otherwise arrive as a batch of useless PCBs.</p>
@@ -983,6 +1008,7 @@
   <script type="module" src="bump-sheet.js"></script>
   <script type="module" src="case.js"></script>
   <script type="module" src="dxf-import.js"></script>
+  <script type="module" src="design-import.js"></script>
   <script type="module" src="landing.js"></script>
   <script type="module" src="examples.js"></script>
   <script type="module" src="tour.js"></script>

@@ -1089,13 +1089,63 @@ window.addEventListener("otc:dxf-outline", (e) => {
   showCableEdgeBanner();
 });
 
-// Finished example design from the landing gallery (examples.js): outline +
-// a complete parameter set, generated immediately. The parameters are written
-// into the form first so the loaded design is fully editable afterwards and
-// the fields show exactly what produced the result.
+// Write a stored parameter set into the form. Returns the leftovers: values
+// that are real /generate inputs but have no control on this page, so they
+// have to ride along as overrides instead of being silently dropped.
+//
+// The type dispatch is the load-bearing part. This used to be a bare
+// `el.value = String(value)`, which is a no-op on a checkbox (setting .value
+// changes the submitted value, not the tick) and misses radio groups
+// entirely, because a group is addressed by NAME and only board_mode was
+// special-cased. So `anchor_holes`, `anchor_hole_square_cells`,
+// `follow_main_padding`, `smooth_follow_padding` and `anchor_hole_lattice`
+// all imported as "whatever the form happened to be showing" — invisible for
+// the built-in examples, which set none of them, and wrong for a design file,
+// which sets all of them.
+function applyParamsToForm(params) {
+  const extras = {};
+  for (const [key, value] of Object.entries(params || {})) {
+    if (key === "board_mode") {
+      const radio = boardModeInputs.find((el) => el.value === value);
+      if (radio) radio.checked = true;
+      continue;
+    }
+    if (key === "router") {
+      const hugEl = document.getElementById("hug_router");
+      if (hugEl) hugEl.checked = value === "hug";
+      continue;
+    }
+    const el = document.getElementById(key);
+    if (el) {
+      if (el.type === "checkbox") el.checked = !!value;
+      else el.value = value === null ? "" : String(value);
+      continue;
+    }
+    const radios = document.querySelectorAll(`input[type="radio"][name="${CSS.escape(key)}"]`);
+    if (radios.length) {
+      radios.forEach((r) => { r.checked = r.value === String(value); });
+      continue;
+    }
+    // No control owns this one — pad_pitch_mm, wiring_keepout_floor_mm and
+    // connector_pos_override are all real inputs with no field on the page.
+    // Dropping them here is how a re-imported design used to come back with
+    // the smallest connector that fits instead of the one it was built with.
+    if (value !== null && value !== undefined) extras[key] = value;
+  }
+  return extras;
+}
+
+// Finished example design from the landing gallery (examples.js), or a design
+// file re-opened through design-import.js: outline + a complete parameter set,
+// generated immediately. The parameters are written into the form first so the
+// loaded design is fully editable afterwards and the fields show exactly what
+// produced the result.
 window.addEventListener("otc:load-example", (e) => {
   const {
     outline, params = {}, label = "example",
+    // The sensorize zone, when the design carried one. Same frame as
+    // `outline`; absent for every built-in example.
+    fillRegion = null,
     // A real robot surface is a SHAPE, not a finished design: which edge the
     // connector exits is a decision about the reader's own build, so those
     // examples require the same explicit Set cable edge as a DXF import (and
@@ -1111,24 +1161,17 @@ window.addEventListener("otc:load-example", (e) => {
   editTarget = "outline";
   updateTargetButtons();
   vertices = outline.map((p) => [p[0], p[1]]);
-  fillVertices = [];
+  fillVertices = Array.isArray(fillRegion) && fillRegion.length >= 3
+    ? fillRegion.map((p) => [p[0], p[1]])
+    : [];
   foldLines = [];
   cableEdgeConfirmed = !requireCableEdge;
   selected = null;
   angleReferenceEdge = null;
-  for (const [key, value] of Object.entries(params)) {
-    if (key === "board_mode") {
-      const radio = boardModeInputs.find((el) => el.value === value);
-      if (radio) radio.checked = true;
-    } else if (key === "router") {
-      const hugEl = document.getElementById("hug_router");
-      if (hugEl) hugEl.checked = value === "hug";
-    } else {
-      const el = document.getElementById(key);
-      if (el) el.value = value === null ? "" : String(value);
-    }
-  }
-  // Examples are stored as explicit taxel sizes, not row/column targets.
+  const extras = applyParamsToForm(params);
+  // Examples and design files both store explicit taxel sizes, never row/column
+  // targets — a stored recipe carries the SOLVED size, so re-solving it here
+  // would be a second answer to a question that already has one.
   if (gridSizeModeInput) gridSizeModeInput.checked = true;
   enforcePitchFloor();
   syncGridMode();
@@ -1136,7 +1179,7 @@ window.addEventListener("otc:load-example", (e) => {
   renderPixelPreview();
   fitViewTo(vertices);
   redraw();
-  setOutlineInfo(`example: ${label}`);
+  setOutlineInfo(fillVertices.length ? `${label} · with a sensorize zone` : `example: ${label}`);
   syncDimensionFields();
   updateCadButtons();
   if (requireCableEdge) {
@@ -1146,7 +1189,63 @@ window.addEventListener("otc:load-example", (e) => {
   } else {
     hideCableEdgeBanner();
   }
-  if (autoGenerate) runGenerate();
+  if (autoGenerate) runGenerate(extras);
+});
+
+// Exact restore of a previously downloaded design (design-import.js): the
+// board comes back with its hand-dragged routes, tail extension and connector
+// size intact, so nothing is re-routed and nothing can come out different.
+//
+// It arrives as a rebuilt board rather than as inputs, so this is deliberately
+// NOT a variant of otc:load-example: the canvas and form are synced to it for
+// further editing, but the preview and ZIP are the restored ones.
+window.addEventListener("otc:restore-design", (e) => {
+  const { outline, params = {}, fillRegion = null, editData, svg, stats, drc,
+          zipB64, label = "design" } = e.detail || {};
+  if (!editData || !svg) return;
+  if (!confirmOverwrite(vertices.length, "board outline")) return;
+  pushUndo();
+  editTarget = "outline";
+  updateTargetButtons();
+  vertices = (outline || editData.outline).map((p) => [p[0], p[1]]);
+  fillVertices = Array.isArray(fillRegion) && fillRegion.length >= 3
+    ? fillRegion.map((p) => [p[0], p[1]])
+    : [];
+  foldLines = [];
+  // A restored board was generated from this outline, so its cable edge was
+  // settled when it was made — asking again would block Generate on a design
+  // that is already built.
+  cableEdgeConfirmed = true;
+  selected = null;
+  angleReferenceEdge = null;
+  applyParamsToForm(params);
+  if (gridSizeModeInput) gridSizeModeInput.checked = true;
+  enforcePitchFloor();
+  syncGridMode();
+  syncAutoExpandControls();
+  renderPixelPreview();
+  fitViewTo(vertices);
+  redraw();
+  setOutlineInfo(`reopened: ${label}`);
+  syncDimensionFields();
+  updateCadButtons();
+  hideCableEdgeBanner();
+
+  // Any bump sheet or case in the page belongs to whatever board was here
+  // before. Drop them before the restored board lands.
+  window.otcBumpInvalidate?.();
+  window.otcCaseInvalidate?.();
+  routeEditor.load(editData, svg);
+  lastZipB64 = zipB64 || null;
+  downloadBtn.disabled = !lastZipB64;
+  setPrintPdf(stats);
+  window.otcBumpBoardReady?.(true);
+  window.otcCaseBoardReady?.(true);
+  renderStats(stats, drc);
+  updateConnectorUpsizeControl(stats?.connector_pos);
+  tailExtensionPromptDismissed = false;
+  hideTailExtensionPrompt();
+  genStatus.textContent = `Reopened ${label}. Edit and re-download, or press Generate PCB to rebuild it from its settings.`;
 });
 
 // Dev annotation capture (stl-viewer.js "Save as example") reads the outline

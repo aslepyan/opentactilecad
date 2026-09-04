@@ -1,10 +1,11 @@
-// Landing page: mode selection (Draw / DXF / STL), the in-tool mode
-// switcher, and the "take the tour" / "browse help" entry points.
+// Landing page: mode selection (Draw / DXF / STL / Describe / Open), the
+// in-tool mode switcher, and the "take the tour" / "browse help" entry points.
 import { showView } from "./views.js";
 
 const stlGroup = document.getElementById("stl-sidebar-group");
 const dxfGroup = document.getElementById("dxf-import-group");
 const chatGroup = document.getElementById("chat-sidebar-group");
+const openGroup = document.getElementById("design-import-group");
 const modeSwitcherButtons = document.querySelectorAll(".mode-switcher .mode-button");
 
 let selectedMode = null;
@@ -14,6 +15,7 @@ export function applyModeVisibility(mode) {
   if (stlGroup) stlGroup.hidden = mode !== "stl";
   if (dxfGroup) dxfGroup.hidden = mode !== "dxf";
   if (chatGroup) chatGroup.hidden = mode !== "chat";
+  if (openGroup) openGroup.hidden = mode !== "open";
   modeSwitcherButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.mode === mode));
   // Nudge stl-viewer.js's resize logic in case the STL panel just became visible.
   window.dispatchEvent(new CustomEvent("otc:view-shown"));
@@ -29,6 +31,7 @@ function selectMode(mode, { openPicker = false } = {}) {
   if (openPicker) {
     if (mode === "dxf") document.getElementById("upload-dxf")?.click();
     if (mode === "stl") document.getElementById("upload-stl")?.click();
+    if (mode === "open") document.getElementById("open-design")?.click();
   }
   window.dispatchEvent(new CustomEvent("otc:mode-selected", { detail: { mode } }));
 }
