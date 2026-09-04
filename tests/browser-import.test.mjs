@@ -3,14 +3,24 @@
 // dependency: just Chrome's own debugging protocol over the WebSocket that
 // node has had built in since v22.
 //
-// Run it with a local backend serving the frontend:
+// Run it against a local backend serving the frontend:
 //
-//   python backend/tests/make_export_zip.py         # the fixture it imports
 //   python -m uvicorn main:app --port 8123          # from backend/
 //   node frontend/tests/browser-import.test.mjs
 //
-//   OTC_APP=http://127.0.0.1:8123/  overrides the URL
-//   OTC_CDP_PORT=9333               overrides the debug port
+// ...or straight at the deployed site, which also exercises the real Render
+// backend and the GitHub Pages sub-path:
+//
+//   OTC_APP=https://aslepyan.github.io/opentactilecad/ node .../browser-import.test.mjs
+//
+//   OTC_APP       the page to drive (default http://127.0.0.1:8123/)
+//   OTC_CDP_PORT  Chrome's debug port (default 9333)
+//
+// It generates its own export in the page rather than reading a fixture, and
+// resolves modules and the API relative to the PAGE, so the same script works
+// on both. Root-relative paths do not: Pages serves the app under
+// /opentactilecad/, where "/design-import.js" returns an HTML 404 that lands
+// in JSON.parse.
 //
 // Worth the ~80 lines of harness: the import flow is the one feature that is
 // mostly *wiring* -- a form field written by the wrong DOM call, an event
@@ -118,9 +128,37 @@ try {
       && document.getElementById("dxf-import-group").hidden`, false),
      "picking Open shows its panel and hides DXF's");
 
+  // Everything below resolves modules and the API relative to the PAGE, not
+  // to the origin root: GitHub Pages serves this app under /opentactilecad/,
+  // so a root-relative "/design-import.js" 404s there and the page gets an
+  // HTML error document where it expected JSON. Same reason the export is
+  // generated here rather than fetched from a fixture file -- the fixture is
+  // gitignored and does not exist on the deployed site.
+  await evaluate(`(async () => {
+    window.__otc = {
+      mod: await import(new URL("design-import.js", location.href).href),
+      api: (await import(new URL("config.js", location.href).href)).API_BASE,
+    };
+    window.__otc.gen = async (body) => {
+      const r = await fetch(window.__otc.api + "/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error("generate HTTP " + r.status);
+      return r.json();
+    };
+    window.__otc.zipBytes = (b64) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return true;
+  })()`);
+
   // ---- exact restore from the downloaded ZIP ----
   const restore = await evaluate(`(async () => {
-    const bytes = await (await fetch("/tests/fixtures/export.zip")).arrayBuffer();
+    const made = await window.__otc.gen({
+      outline: [[-20,-20],[20,-20],[20,20],[-20,20]], router: "hug",
+      board_mode: "expand", pixel_w_mm: 4, pixel_h_mm: 4,
+      pitch_x_mm: 4.2, pitch_y_mm: 4.2,
+    });
+    const bytes = window.__otc.zipBytes(made.zip_b64);
     const dt = new DataTransfer();
     dt.items.add(new File([bytes], "my_sensor.zip", { type: "application/zip" }));
     const input = document.getElementById("design-input");
@@ -162,21 +200,16 @@ try {
 
   // ---- recipe path, from a loose manifest.json with non-default settings ----
   const recipe = await evaluate(`(async () => {
-    const r = await fetch("/generate", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        outline: [[-18,-18],[18,-18],[18,18],[-18,18]],
-        router: "hug", board_mode: "fixed_keepout",
-        pixel_w_mm: 3, pixel_h_mm: 3, pitch_x_mm: 3.4, pitch_y_mm: 3.4,
-        anchor_holes: true, anchor_hole_lattice: "paired",
-        anchor_hole_square_cells: false, cable_length_mm: 15,
-      }),
+    const data = await window.__otc.gen({
+      outline: [[-18,-18],[18,-18],[18,18],[-18,18]],
+      router: "hug", board_mode: "fixed_keepout",
+      pixel_w_mm: 3, pixel_h_mm: 3, pitch_x_mm: 3.4, pitch_y_mm: 3.4,
+      anchor_holes: true, anchor_hole_lattice: "paired",
+      anchor_hole_square_cells: false, cable_length_mm: 15,
     });
-    const data = await r.json();
     // Pull manifest.json out of the ZIP the same way the app does.
-    const mod = await import("/design-import.js");
-    const bin = Uint8Array.from(atob(data.zip_b64), c => c.charCodeAt(0));
-    const entry = await mod.readZipEntry(bin.buffer, ["manifest.json"]);
+    const bin = window.__otc.zipBytes(data.zip_b64);
+    const entry = await window.__otc.mod.readZipEntry(bin.buffer, ["manifest.json"]);
     const dt = new DataTransfer();
     dt.items.add(new File([entry.text], "recipe.json", { type: "application/json" }));
     const input = document.getElementById("design-input");
