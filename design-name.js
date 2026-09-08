@@ -28,6 +28,8 @@ let sourceStem = "";   // derived from an uploaded file, example, or import
 let userStem = "";     // whatever the user typed; wins over everything
 let autoStem = "";     // the timestamp fallback, generated once per design
 let inputEl = null;
+let hintEl = null;
+let printedStem = null;  // the name baked into the silkscreen of the last board
 
 // Matches the sanitiser already used for the mesh-library name in
 // stl-viewer.js, so names produced by the two paths look alike.
@@ -95,6 +97,31 @@ export function clearSource() {
 }
 
 /**
+ * Record the name that went onto the board's silkscreen.
+ *
+ * The label is stroked into the Gerbers at generate time, so a name typed
+ * afterwards changes the ZIP's filename but not the copper. Rather than
+ * silently shipping a board whose silkscreen disagrees with its filename, the
+ * field says so and points at the fix (regenerate).
+ */
+export function markPrinted(stem) {
+  printedStem = stem === null ? null : sanitize(stem);
+  syncHint();
+}
+
+/** Forget it: nothing is generated, so there is nothing to disagree with. */
+export function clearPrinted() {
+  printedStem = null;
+  syncHint();
+}
+
+function syncHint() {
+  if (!hintEl) return;
+  const stale = printedStem !== null && sanitize(designStem()) !== printedStem;
+  hintEl.hidden = !stale;
+}
+
+/**
  * Filename for one artefact of the current design.
  *   downloadName("", "zip")            -> fingertip_wrap.zip
  *   downloadName("case_top", "stl")    -> fingertip_wrap_case_top.stl
@@ -114,6 +141,7 @@ function syncInput() {
   // is the one behaviour that would make this feature annoying.
   if (!userStem) inputEl.value = derivedStem();
   inputEl.placeholder = derivedStem();
+  syncHint();
 }
 
 export function bindInput(el) {
@@ -124,6 +152,7 @@ export function bindInput(el) {
     const stem = sanitize(el.value);
     // An empty box means "go back to automatic" rather than "name it nothing".
     userStem = stem;
+    syncHint();
   });
   el.addEventListener("blur", () => {
     // Show what will actually be used, including any sanitising, so the name in
@@ -141,5 +170,6 @@ window.addEventListener("otc:mode-selected", (event) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
+  hintEl = document.getElementById("design-name-hint");
   bindInput(document.getElementById("design-name"));
 });

@@ -656,6 +656,12 @@ button.mode-button.active {
   min-width: 0;
 }
 .download-bar__name .mini { margin: 0; white-space: nowrap; }
+.download-bar__hint {
+  margin: 0;
+  white-space: nowrap;
+  color: #a05a00;
+  cursor: help;
+}
 .download-bar__name input {
   width: 22ch;
   min-width: 0;

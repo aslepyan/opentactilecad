@@ -3,7 +3,7 @@
 // or a DXF import (dxf-import.js). A second, optional polygon (the "sensorize
 // zone") constrains where sensors get packed inside the outline.
 import { API_BASE } from "./config.js";
-import { downloadName } from "./design-name.js";
+import { clearPrinted, designStem, downloadName, markPrinted } from "./design-name.js";
 import { createRouteEditor } from "./route-editor.js";
 
 const canvas = document.getElementById("outline-canvas");
@@ -1592,6 +1592,9 @@ function readParams() {
   }
   p.preserve_sensors = true;
   p.auto_expand_board = p.board_mode === "expand";
+  // Printed on the front silkscreen just inboard of the connector. The backend
+  // re-sanitises it and drops it if it will not fit.
+  p.design_name = designStem();
   p.follow_main_padding = document.getElementById("follow_main_padding").checked;
   p.smooth_follow_padding = document.getElementById("smooth_follow_padding").checked;
   if (!p.auto_expand_board) {
@@ -1752,6 +1755,7 @@ async function runGenerate(overrides = {}) {
   downloadBtn.disabled = true;
   setPrintPdf(null);
   lastZipB64 = null;
+  clearPrinted();
   // Any previously built bump sheet belongs to the OLD board. Drop it before
   // the new one lands, so a stale STL can never be downloaded as if it fitted.
   window.otcBumpInvalidate?.();
@@ -1776,6 +1780,7 @@ async function runGenerate(overrides = {}) {
       routeEditStatus.textContent = "";
     }
     lastZipB64 = data.zip_b64;
+    markPrinted(body.design_name ?? "");
     downloadBtn.disabled = false;
     setPrintPdf(data.stats);
     window.otcBumpBoardReady?.(!!data.edit_data);

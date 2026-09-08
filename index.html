@@ -811,8 +811,10 @@
             <span class="mini">Name</span>
             <input id="design-name" type="text" spellcheck="false"
                    autocomplete="off"
-                   title="Base name for every file you download from this design. Defaults to the file you started from, or the date and time if you drew it from scratch.">
+                   title="Base name for every file you download from this design, and the label printed on the front silkscreen just above the connector. Defaults to the file you started from, or the date and time if you drew it from scratch.">
           </label>
+          <span id="design-name-hint" class="mini download-bar__hint" hidden
+                title="The silkscreen label is drawn into the Gerbers when the board is generated. The downloaded files will use the new name, but the printed board still carries the old one.">Regenerate to print this name</span>
           <span id="pdf-status" class="mini download-bar__status"></span>
           <button id="download-pdf" type="button" class="secondary" disabled
                   title="A 1:1 printable outline. Print it at 100%, cut it out and hold it against the real part to check the fit before ordering boards.">Download printable PDF</button>
