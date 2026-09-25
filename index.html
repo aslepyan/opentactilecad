@@ -323,6 +323,9 @@
             <label>Edge keepout <input id="edge_keepout_mm" type="number" step="0.1" value="0.5" /></label>
           </div>
 
+          <!-- Anchor holes: not shipping yet. Hidden, not deleted; drop `hidden`
+               to bring the section back. The unchecked box sends anchor_holes=false. -->
+          <div id="anchor-holes-section" hidden>
           <h3 class="params-subhead">Bump anchor holes</h3>
           <p class="hint">
             Cuts a hole clean through the board under every shear bump, so the bump
@@ -352,6 +355,7 @@
               <input id="anchor_hole_square_cells" type="checkbox" checked />
               <span>Keep blocks square (round bump, isotropic shear)</span>
             </label>
+          </div>
           </div>
 
           <h3 class="params-subhead">Routing &amp; clearance</h3>
@@ -818,6 +822,10 @@
           <span id="pdf-status" class="mini download-bar__status"></span>
           <button id="download-pdf" type="button" class="secondary" disabled
                   title="A 1:1 printable outline. Print it at 100%, cut it out and hold it against the real part to check the fit before ordering boards.">Download printable PDF</button>
+          <button id="download-velostat-dxf" type="button" class="secondary" disabled
+                  title="The Velostat piece as a DXF in millimetres, for a laser cutter. Covers the sensor area only, not the tail.">Velostat DXF</button>
+          <button id="download-velostat-pdf" type="button" class="secondary" disabled
+                  title="The Velostat shape printed twice, mirrored across a fold line. Fold the paper with the Velostat inside and cut both together.">Velostat fold PDF</button>
           <button id="download" type="button" class="primary" disabled>Download ZIP</button>
         </div>
       </section>

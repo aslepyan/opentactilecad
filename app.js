@@ -1868,6 +1868,7 @@ let lastPdf = null;
 function setPrintPdf(stats) {
   lastPdf = stats?.print_pdf || null;
   if (downloadPdfBtn) downloadPdfBtn.disabled = !lastPdf;
+  setVelostat(stats);
   if (!pdfStatus) return;
   pdfStatus.textContent = lastPdf
     ? (lastPdf.pages > 1
@@ -1893,6 +1894,51 @@ downloadPdfBtn?.addEventListener("click", () => {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+});
+
+// ---- Velostat cut files ----
+// Same producer as the printable PDF (the export call), same lifecycle: they
+// ride on stats and are refreshed wherever setPrintPdf is. Too big to fold
+// gives one un-mirrored copy (fold null); too big for even that, no PDF.
+const downloadVeloDxfBtn = document.getElementById("download-velostat-dxf");
+const downloadVeloPdfBtn = document.getElementById("download-velostat-pdf");
+let lastVelostat = null;
+
+function setVelostat(stats) {
+  lastVelostat = stats?.velostat || null;
+  if (downloadVeloDxfBtn) downloadVeloDxfBtn.disabled = !lastVelostat?.dxf_b64;
+  if (downloadVeloPdfBtn) {
+    const hasPdf = !!lastVelostat?.fold_pdf_b64;
+    const folds = !lastVelostat || !hasPdf || !!lastVelostat.fold;
+    downloadVeloPdfBtn.disabled = !hasPdf;
+    downloadVeloPdfBtn.textContent = folds ? "Velostat fold PDF" : "Velostat PDF";
+    downloadVeloPdfBtn.title = !lastVelostat || hasPdf
+      ? (folds
+          ? "The Velostat shape printed twice, mirrored across a fold line. Fold the paper with the Velostat inside and cut both together."
+          : "Too large to print twice on one sheet, so the shape is printed once at 1:1. Tape the Velostat under the sheet and cut both together.")
+      : "This sensor is too large for one A3 sheet. Use the Velostat DXF instead.";
+  }
+}
+
+function saveB64(b64, type, filename) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+downloadVeloDxfBtn?.addEventListener("click", () => {
+  if (lastVelostat?.dxf_b64) saveB64(lastVelostat.dxf_b64, "application/dxf", downloadName("velostat", "dxf"));
+});
+downloadVeloPdfBtn?.addEventListener("click", () => {
+  if (lastVelostat?.fold_pdf_b64) saveB64(lastVelostat.fold_pdf_b64, "application/pdf", downloadName("velostat_fold", "pdf"));
 });
 
 window.otcGetEditData = () => routeEditor.getEditData();
