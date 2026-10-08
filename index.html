@@ -392,6 +392,16 @@
 
           <h3 class="params-subhead">Board sizing <a href="#" class="help-link" data-help-target="help-board-sizing" title="What do these do?">(?)</a></h3>
           <div class="params params--emphasis">
+            <label class="check-field" title="Columns on the top copper, rows on the bottom copper. Every wire runs around the sensor field to the connector.">
+              <input type="radio" name="copper_layers" value="2" checked />
+              2 copper layers: wiring runs around the sensor field
+            </label>
+            <label class="check-field" title="Rows are wired on two inner copper layers instead: In1 carries each row to the connector, In2 the links across notches. Rows need no wiring band around the field, so a fixed outline keeps more taxels. Costs more to fabricate.">
+              <input type="radio" name="copper_layers" value="4" />
+              4 copper layers: rows wired underneath, on inner layers
+            </label>
+          </div>
+          <div class="params params--emphasis">
             <label class="check-field" title="Keep the sensor grid at max density and grow the final board outline outward until every wire fits.">
               <input type="radio" name="board_mode" value="expand" checked />
               Grow board to fit wiring
@@ -416,7 +426,7 @@
                 <input id="follow_main_padding" type="checkbox" checked />
                 Follow layout/routes
               </label>
-              <label title="Distance from the outermost main layout or route to the final board edge. Tail dimensions remain separate.">
+              <label title="Distance from the outermost main layout or route to the final board edge. On 4 copper layers it is only added where wires run at the edge (mostly by the connector); elsewhere the board keeps the shape you drew. Tail dimensions remain separate.">
                 Follow padding
                 <input id="follow_main_padding_mm" type="number" min="0" step="0.1" value="2.0" />
               </label>
@@ -897,6 +907,8 @@
           </dl>
           <h3>Board sizing</h3>
           <dl class="help-glossary">
+            <dt>2 or 4 copper layers (<code>copper_layers</code>)</dt>
+            <dd>On 2 layers, columns run on the top copper and rows on the bottom, and every wire travels around the outside of the sensor field to the connector, so the board needs a wiring band around the field. On 4 layers the rows are wired on two inner layers instead: In1 carries each row straight through the field to the connector, in row order, and In2 joins the pieces of rows a notch cuts in two. Rows then need no band, so with a fixed outline more of it holds taxels. Either choice works with either board mode below. A 4-layer board costs more to fabricate, and needs the hug router.</dd>
             <dt>Grow board to fit wiring (<code>board_mode: "expand"</code>)</dt>
             <dd>The default. Sensors are packed at maximum density inside the shape you drew, then the final board outline is grown outward until every wire fits. No sensor is ever dropped — but the exported board is larger than the shape you drew.</dd>
             <dt>Keep outline fixed, shrink sensor grid (<code>board_mode: "fixed_keepout"</code>)</dt>
@@ -908,7 +920,7 @@
             <dt>Follow layout/routes (<code>follow_main_padding</code>)</dt>
             <dd>Instead of a boxy expanded rectangle, shrink-wraps the final board edge to hug the actual sensor grid and wire bundles — a more organic, compact final shape.</dd>
             <dt>Follow padding (<code>follow_main_padding_mm</code>)</dt>
-            <dd>How much space (mm) to leave between the outermost wire/sensor and the shrink-wrapped edge.</dd>
+            <dd>How much space (mm) to leave between the outermost wire/sensor and the shrink-wrapped edge. On 4 copper layers the rows leave on the inner layers, so wires run at the edge only near the connector (the column fan-out, and any row left on the back): the padding goes there, and everywhere else the board keeps the shape you drew.</dd>
             <dt>Smooth follow edge (<code>smooth_follow_padding</code>)</dt>
             <dd>Rounds that shrink-wrapped edge instead of leaving sharp mitered corners.</dd>
             <dt>Tail extension</dt>

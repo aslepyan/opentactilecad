@@ -1132,6 +1132,7 @@ function applyParamsToForm(params) {
     // the smallest connector that fits instead of the one it was built with.
     if (value !== null && value !== undefined) extras[key] = value;
   }
+  syncCopperLayers();
   return extras;
 }
 
@@ -1372,6 +1373,24 @@ function selectedBoardMode() {
   return picked ? picked.value : "expand";
 }
 
+// Copper layers: 2 or 4, independent of the board mode. Only the hug router
+// wires the inner layers (the legacy router knows 2), so picking 4 holds the
+// router checkbox on.
+const copperLayerInputs = Array.from(document.querySelectorAll('input[name="copper_layers"]'));
+function selectedCopperLayers() {
+  const picked = copperLayerInputs.find((el) => el.checked);
+  return picked && picked.value === "4" ? 4 : 2;
+}
+function syncCopperLayers() {
+  const hugEl = document.getElementById("hug_router");
+  if (!hugEl) return;
+  const four = selectedCopperLayers() === 4;
+  if (four) hugEl.checked = true;
+  hugEl.disabled = four;
+  hugEl.closest("label")?.setAttribute("aria-disabled", four ? "true" : "false");
+}
+copperLayerInputs.forEach((el) => el.addEventListener("change", syncCopperLayers));
+
 // Hug routing works in both board modes now (fixed-outline sizes its wiring
 // keep-out band exactly from the hug routing plan), so the checkbox is never
 // greyed out.
@@ -1566,7 +1585,8 @@ function readParams() {
   p.pitch_x_mm = Math.max(p.pitch_x_mm, p.pixel_w_mm);
   p.pitch_y_mm = Math.max(p.pitch_y_mm, p.pixel_h_mm);
   p.board_mode = selectedBoardMode();
-  p.router = document.getElementById("hug_router").checked ? "hug" : "legacy";
+  p.copper_layers = selectedCopperLayers();
+  p.router = document.getElementById("hug_router").checked || p.copper_layers === 4 ? "hug" : "legacy";
   // In rows/cols mode the backend solves pixel size and pitch from the outline,
   // so the pixel_*/pitch_* values above are sent but ignored. Only send the
   // targets in that mode — sending them always would override the size fields.
@@ -1966,6 +1986,16 @@ connectorUpsizeBtn.addEventListener("click", async () => {
   }
 });
 
+// "2", or "4 — N rows wired on the inner layers" (and how many stayed on
+// the bottom copper, if any did).
+function copperLayersText(stats) {
+  if (stats.copper_layers !== 4) return "2";
+  const inner = stats.rows_on_inner_layers || {};
+  const n = (inner["In1.Cu"] || 0) + (inner["In2.Cu"] || 0);
+  if (stats.router !== "hug") return "4 — inner layers unused (legacy router)";
+  return `4 — ${n} row${n === 1 ? "" : "s"} wired on the inner layers`;
+}
+
 function renderStats(stats, drc) {
   const tailWidth = `${stats.tail_width_mm} mm`;
   // Headline first: the handful of numbers a first-time user actually needs
@@ -1977,6 +2007,7 @@ function renderStats(stats, drc) {
     ["Board mode", stats.board_mode === "fixed_keepout"
       ? "outline kept exactly as drawn"
       : "board grown to fit the wiring"],
+    ["Copper layers", copperLayersText(stats)],
     ["Design check (DRC)", drc.violations === 0
       ? "0 violations — ready to manufacture"
       : `${drc.violations} violations — see details below`],
@@ -2014,6 +2045,11 @@ function renderStats(stats, drc) {
     ["Connector export", stats.connector_export_enabled ? "on" : "off"],
     ...(stats.connector_export_warning ? [["Connector warning", stats.connector_export_warning]] : []),
     ["Board mode", stats.board_mode === "fixed_keepout" ? "keep outline fixed" : "grow to fit wiring"],
+    ["Copper layers", copperLayersText(stats)],
+    ...(stats.copper_layers === 4 ? [
+      ["Rows on In1 / In2", `${(stats.rows_on_inner_layers || {})["In1.Cu"] || 0} / ${(stats.rows_on_inner_layers || {})["In2.Cu"] || 0}`],
+      ["Rows linked across notches on In2", `${stats.rows_linked_on_in2 || 0}`],
+    ] : []),
     ["Router", stats.router === "hug" ? "hug (wires follow the sensor shape)" : "legacy"],
     ...(stats.board_mode === "fixed_keepout" ? [
       ["Pixels dropped for wiring", `${stats.dropped_by_keepout || 0} of ${stats.max_pack_pixels || 0} max-packed`],
